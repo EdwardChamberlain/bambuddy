@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
 # and non-HTTP targets without banning private LAN addresses.
 LAN_SERVICE_URL_SETTINGS = ("ha_url", "obico_ml_url", "orcaslicer_api_url", "bambu_studio_api_url")
 
+from backend.app.schemas.print_queue import TriState
+
 
 class AppSettings(BaseModel):
     """Application settings schema."""
@@ -309,9 +311,10 @@ class AppSettings(BaseModel):
         description="Enable user email notifications for print job events (requires Advanced Authentication)",
     )
 
-    # Default print options
-    default_bed_levelling: bool = Field(default=True, description="Default bed levelling option for new prints")
-    default_flow_cali: bool = Field(default=False, description="Default flow calibration option for new prints")
+    # Default print options. bed_levelling / flow_cali / nozzle_offset_cali are
+    # tri-state (off/on/auto), defaulting to "auto" per BambuStudio.
+    default_bed_levelling: TriState = Field(default="auto", description="Default bed levelling option for new prints")
+    default_flow_cali: TriState = Field(default="auto", description="Default flow calibration option for new prints")
     default_vibration_cali: bool = Field(
         default=True, description="Default vibration calibration option for new prints"
     )
@@ -319,8 +322,8 @@ class AppSettings(BaseModel):
         default=False, description="Default first layer inspection option for new prints"
     )
     default_timelapse: bool = Field(default=False, description="Default timelapse option for new prints")
-    default_nozzle_offset_cali: bool = Field(
-        default=True,
+    default_nozzle_offset_cali: TriState = Field(
+        default="auto",
         description="Default nozzle offset calibration option for new prints (dual-nozzle printers only)",
     )
 
@@ -514,12 +517,12 @@ class AppSettingsUpdate(BaseModel):
     low_stock_threshold: float | None = Field(default=None, ge=0.1, le=99.9)
     session_max_hours: int | None = Field(default=None, ge=1, le=720)
     user_notifications_enabled: bool | None = None
-    default_bed_levelling: bool | None = None
-    default_flow_cali: bool | None = None
+    default_bed_levelling: TriState | None = None
+    default_flow_cali: TriState | None = None
     default_vibration_cali: bool | None = None
     default_layer_inspect: bool | None = None
     default_timelapse: bool | None = None
-    default_nozzle_offset_cali: bool | None = None
+    default_nozzle_offset_cali: TriState | None = None
     require_plate_clear: bool | None = None
     queue_shortest_first: bool | None = None
     nozzle_temp_presets: str | None = None
