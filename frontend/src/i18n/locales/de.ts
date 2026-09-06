@@ -2963,6 +2963,7 @@ export default {
       clearAll: 'Alle abwählen',
       permissionsSelected: '{{count}} ausgewählt',
       noResults: 'Keine Berechtigungen entsprechen Ihrer Suche',
+      websocketHint: 'Erforderlich für Live-Aktualisierungen. Ohne diese Berechtigung greift die Oberfläche auf regelmäßiges Abrufen zurück.',
     },
   },
 
@@ -3164,6 +3165,8 @@ export default {
       },
     },
     connectedAs: 'Verbunden als',
+    signInExpiredTitle: 'Bambu-Cloud-Anmeldung abgelaufen',
+    signInExpiredBody: 'Bambu Lab akzeptiert das gespeicherte Token nicht mehr. Melden Sie sich erneut an, um Cloud-Profile, MakerWorld-Importe und Firmware-Prüfungen wiederherzustellen.',
     logout: 'Abmelden',
     noLogoutPermission: 'Sie haben keine Berechtigung zum Abmelden',
     failedToLoad: 'Profile konnten nicht geladen werden',
@@ -6050,7 +6053,8 @@ export default {
       mqtt_auth: {
         title: 'Drucker-Zugangsdaten',
         pass: 'Der Drucker hat die Verbindung akzeptiert.',
-        fail: 'Der Drucker ist erreichbar, hat die Verbindung aber abgelehnt. Der Zugangscode oder die Seriennummer ist höchstwahrscheinlich falsch. Der Zugangscode ändert sich bei jedem Umschalten des Entwicklermodus — kopieren Sie ihn erneut vom Druckerbildschirm.',
+        fail: 'Der Drucker ist erreichbar, aber Bambuddy ist nicht mit ihm verbunden. Höchstwahrscheinlich ist der Zugangscode oder die Seriennummer falsch — der Zugangscode ändert sich bei jedem Umschalten von „Nur LAN“ oder des Entwicklermodus, kopieren Sie ihn also erneut vom Druckerbildschirm. Ein Drucker, der gerade neu startet oder bereits die maximale Anzahl gleichzeitiger Verbindungen erreicht hat, sieht genauso aus.',
+        fail_auth_rejected: 'Der Drucker hat die Zugangsdaten von Bambuddy abgelehnt. Der Zugangscode oder die Seriennummer ist falsch — der Zugangscode ändert sich bei jedem Umschalten von „Nur LAN“ oder des Entwicklermodus. Kopieren Sie ihn erneut vom Druckerbildschirm und speichern Sie ihn in den Druckereinstellungen.',
         skip: 'Nicht geprüft — der Drucker konnte nicht erreicht werden.',
       },
       developer_mode: {
@@ -6209,6 +6213,8 @@ export default {
     resolveButton: 'Laden',
     signInRequiredTitle: 'Bambu-Cloud-Anmeldung für Download erforderlich',
     signInRequiredBody: 'Modell-Details können anonym angezeigt werden, aber MakerWorld verlangt eine Bambu-Cloud-Anmeldung zum Herunterladen der 3MF-Dateien.',
+    signInExpiredTitle: 'Bambu-Cloud-Anmeldung abgelaufen',
+    signInExpiredBody: 'Sie sind weiterhin bei Bambuddy angemeldet, aber Bambu Lab akzeptiert das gespeicherte Token nicht mehr, daher schlagen Downloads fehl. Melden Sie sich erneut bei Bambu Cloud an.',
     openCloudSettings: 'Cloud-Einstellungen öffnen',
     untitledModel: 'Unbenanntes Modell',
     byCreator: 'von {{name}}',
