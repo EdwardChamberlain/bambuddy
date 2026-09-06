@@ -1274,7 +1274,10 @@ async def delete_folder(
 
         return file_ids
 
-    await get_all_file_ids(folder_id)
+    doomed_file_ids = await get_all_file_ids(folder_id)
+    from backend.app.services.library_trash import release_queue_references
+
+    await release_queue_references(db, doomed_file_ids)
 
     # Delete folder (cascade will handle files and subfolders)
     await db.delete(folder)
@@ -4393,6 +4396,9 @@ async def delete_file(
                 abs_thumb_path.unlink()
             except OSError as e:
                 logger.warning("Failed to delete thumbnail from disk: %s", e)
+        from backend.app.services.library_trash import release_queue_references
+
+        await release_queue_references(db, [file.id])
         await db.delete(file)
         await db.commit()
         return {"status": "success", "message": "File deleted", "trashed": False}
@@ -4717,6 +4723,9 @@ async def bulk_delete(
                     abs_thumb_path.unlink()
                 except OSError as e:
                     logger.warning("Failed to delete thumbnail from disk: %s", e)
+            from backend.app.services.library_trash import release_queue_references
+
+            await release_queue_references(db, [file.id])
             await db.delete(file)
         else:
             file.deleted_at = now
@@ -4740,6 +4749,13 @@ async def bulk_delete(
                 )
             )
             deleted_files += file_count_result.scalar() or 0
+            folder_file_ids = [
+                row[0]
+                for row in (await db.execute(select(LibraryFile.id).where(LibraryFile.folder_id == folder_id))).all()
+            ]
+            from backend.app.services.library_trash import release_queue_references
+
+            await release_queue_references(db, folder_file_ids)
             await db.delete(folder)
             deleted_folders += 1
 
