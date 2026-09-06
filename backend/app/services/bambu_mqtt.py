@@ -558,6 +558,7 @@ class BambuMQTTClient:
         on_drying_complete: Callable[[int], None] | None = None,
         on_print_running_observed: Callable[[dict], None] | None = None,
         on_finish_photo_moment: Callable[[dict], None] | None = None,
+        on_tray_change: Callable[[int, int], None] | None = None,
     ):
         self.ip_address = ip_address
         self.serial_number = serial_number
@@ -581,6 +582,9 @@ class BambuMQTTClient:
         # the same shape as on_print_start (filename / subtask_name /
         # remaining_time / raw_data / ams_mapping).
         self.on_print_running_observed = on_print_running_observed
+        # Fired whenever a mid-print tray change is appended to the in-memory
+        # log so restart recovery can persist the segment boundary.
+        self.on_tray_change = on_tray_change
         # #1721: fired the moment the printer enters the end-of-print
         # "Filament unloading" phase (stg_cur=22 while progress>=99 or
         # we've hit the last layer / remaining_time<=0). This is the
@@ -644,6 +648,8 @@ class BambuMQTTClient:
         self._raw_message_handlers: list[Callable[[str, bytes], None]] = []
         self._disconnection_event: threading.Event | None = None
         self._previous_ams_hash: str | None = None  # Track AMS changes
+        # The normal AMS hash does not include the external-spool payload.
+        self._previous_vt_tray_hash: str | None = None
 
         # Cache AMS firmware/SN from get_version in case it arrives before AMS status
         # Key: ams_id (int). Value: {'sw_ver': str, 'sn': str}
@@ -1297,6 +1303,12 @@ class BambuMQTTClient:
                         vt_tray = [vt_tray]
                     self.state.raw_data["vt_tray"] = vt_tray
 
+            # External-spool-only changes must re-run assignment
+            # reconciliation; the regular AMS hash covers only AMS units.
+            # Exclude remain so a running print does not trigger this on every
+            # percentage update.
+            self._maybe_trigger_external_spool_change()
+
             # Parse ams_status directly from print data (NOT from print.ams)
             # ams_status is a combined value: lower 8 bits = sub status, bits 8-15 = main status
             # Main status: 0=idle, 1=filament_change, 2=rfid_identifying, 3=assist, 4=calibration
@@ -1859,7 +1871,6 @@ class BambuMQTTClient:
                         A2L_LITE_NORMALIZED_AMS_ID,
                     )
                 self._has_a2l_am_unit = True
-
     def _handle_ams_data(self, ams_data):
         """Handle AMS data changes for Spoolman integration.
 
@@ -2138,6 +2149,8 @@ class BambuMQTTClient:
                             tn,
                             self.state.layer_num,
                         )
+                        if self.on_tray_change:
+                            self.on_tray_change(tn, self.state.layer_num)
                     self.state.last_loaded_tray = self.state.tray_now
 
                 logger.debug("[%s] tray_now updated: %s", self.serial_number, self.state.tray_now)
