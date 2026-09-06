@@ -101,16 +101,10 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     # can_queue — queue write ops + reprint (which enqueues an existing archive)
     Permission.QUEUE_CREATE: "can_queue",
     Permission.QUEUE_UPDATE_OWN: "can_queue",
-    # These ALL permissions also gate legitimate global queue operations
-    # (batch cancellation/reorder and archive reprint). Ownership-aware routes
-    # deliberately check the corresponding OWN permission below instead.
-    Permission.QUEUE_UPDATE_ALL: "can_queue",
     Permission.QUEUE_DELETE_OWN: "can_queue",
-    Permission.QUEUE_DELETE_ALL: "can_queue",
     Permission.QUEUE_REORDER: "can_queue",
     Permission.QUEUE_INSERT_TOP: "can_queue",
     Permission.ARCHIVES_REPRINT_OWN: "can_queue",
-    Permission.ARCHIVES_REPRINT_ALL: "can_queue",
     # can_control_printer — physical-world side effects on hardware
     Permission.PRINTERS_CONTROL: "can_control_printer",
     Permission.PRINTERS_FILES: "can_control_printer",
@@ -119,16 +113,15 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     Permission.SMART_PLUGS_CONTROL: "can_control_printer",
     # can_manage_library — file-manager scope (upload/rename/delete library
     # entries + MakerWorld import which downloads files into the library).
-    # Both ownership variants retain the category scope for legacy/global
-    # endpoints. The ownership dependency resolves the key's user and checks
-    # the OWN permission, so row-level routes remain owner-scoped.
+    # Only OWN ownership variants are exposed to API keys. The ownership
+    # dependency resolves the key's user and applies the normal per-row check;
+    # ALL variants remain admin/JWT-only because API keys have no all-row
+    # capability.
     # LIBRARY_PURGE stays admin-only as a genuinely destructive op that
     # bypasses the soft-delete window.
     Permission.LIBRARY_UPLOAD: "can_manage_library",
     Permission.LIBRARY_UPDATE_OWN: "can_manage_library",
-    Permission.LIBRARY_UPDATE_ALL: "can_manage_library",
     Permission.LIBRARY_DELETE_OWN: "can_manage_library",
-    Permission.LIBRARY_DELETE_ALL: "can_manage_library",
     Permission.MAKERWORLD_IMPORT: "can_manage_library",
     # can_manage_inventory — inventory write scope. Covers the documented
     # spool/catalog/forecast write surface AND the SpoolBuddy kiosk endpoints
@@ -140,18 +133,10 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     Permission.INVENTORY_UPDATE: "can_manage_inventory",
     Permission.INVENTORY_DELETE: "can_manage_inventory",
     Permission.INVENTORY_FORECAST_WRITE: "can_manage_inventory",
-    # Print-history curation is an explicit API-key scope. Purge remains
+    # Print-history curation is administrative for API keys. Purge remains
     # administrative because it removes the statistics contribution (#1888).
-    Permission.ARCHIVES_CREATE: "can_manage_archives",
     Permission.ARCHIVES_UPDATE_OWN: "can_manage_archives",
-    Permission.ARCHIVES_UPDATE_ALL: "can_manage_archives",
     Permission.ARCHIVES_DELETE_OWN: "can_manage_archives",
-    Permission.ARCHIVES_DELETE_ALL: "can_manage_archives",
-    # Project CRUD and membership changes are an explicit API-key scope. Read
-    # access remains covered by can_read_status (#1893).
-    Permission.PROJECTS_CREATE: "can_manage_projects",
-    Permission.PROJECTS_UPDATE: "can_manage_projects",
-    Permission.PROJECTS_DELETE: "can_manage_projects",
     # can_access_cloud — narrow opt-in scope, gated by the router-level
     # ``_cloud_api_key_gate`` and additionally enforced here so the route-
     # level ``cloud_caller(Permission.CLOUD_AUTH)`` dep also fails closed
@@ -199,11 +184,22 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.PRINTERS_CREATE,
         Permission.PRINTERS_UPDATE,
         Permission.PRINTERS_DELETE,
+        Permission.ARCHIVES_CREATE,
+        Permission.ARCHIVES_UPDATE_ALL,
+        Permission.ARCHIVES_DELETE_ALL,
+        Permission.QUEUE_UPDATE_ALL,
+        Permission.QUEUE_DELETE_ALL,
+        Permission.ARCHIVES_REPRINT_ALL,
+        Permission.LIBRARY_UPDATE_ALL,
+        Permission.LIBRARY_DELETE_ALL,
         Permission.ARCHIVES_PURGE,
-        # Library purge remains denied; row-level file operations use the
-        # owner-resolving ownership dependency even though their ALL
-        # permissions retain the category scope above.
+        # Library ALL-ownership operations stay denied. OWN operations are
+        # allowed through the owner-resolving ownership dependency; folder and
+        # batch operations that require ALL remain admin/JWT-only.
         Permission.LIBRARY_PURGE,
+        Permission.PROJECTS_CREATE,
+        Permission.PROJECTS_UPDATE,
+        Permission.PROJECTS_DELETE,
         Permission.FILAMENTS_CREATE,
         Permission.FILAMENTS_UPDATE,
         Permission.FILAMENTS_DELETE,
@@ -1726,10 +1722,10 @@ def require_ownership_permission(
     - User with ``own_permission`` can only modify items where created_by_id == user.id
     - Ownerless items (created_by_id = null) require ``all_permission``
     - API keys (via X-API-Key header or Bearer bb_xxx) must satisfy the
-      ``own_permission``'s scope flag and are evaluated as the owner of the
-      key. API keys are intentionally own-only: the key record has no
+      ``own_permission``'s API-key scope flag and are evaluated as the owner
+      of the key. API keys are intentionally own-only: the key record has no
       all-ownership capability, and an ownerless legacy key cannot safely be
-      used on an ownership-scoped route. Pre-GHSA-r2qv-8222-hqg3 this
+      used on an ownership-scoped route. Before the GHSA-r2qv-8222-hqg3 fix this
       returned ``(None, True)`` for any valid key with no scope check.
 
     Returns:

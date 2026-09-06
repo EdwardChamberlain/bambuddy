@@ -4024,8 +4024,9 @@ async def slice_archive(
     archive = await db.get(PrintArchive, archive_id)
     # Per-row ownership gate — mirror the archive read routes. LIBRARY_UPLOAD
     # alone let a READ_OWN caller slice another user's archive by raw id even
-    # though GET on that id returned 404. The ownership dependency also
-    # resolves an API-key owner instead of treating a key as an all-row caller.
+    # though GET on that id returned 404. Enforce the same visibility here. The
+    # ownership dependency also resolves an API-key owner instead of treating a
+    # key as an all-row caller.
     owner_user, can_read_all = auth_result
     archive = _ensure_archive_visible(archive, owner_user, can_read_all)
 
