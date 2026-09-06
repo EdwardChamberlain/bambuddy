@@ -3399,6 +3399,7 @@ async def _run_slicer_with_fallback(
         SlicerApiService,
         SlicerApiUnavailableError,
         SlicerInputError,
+        get_stall_timeout_seconds,
     )
 
     user: User | None = None
@@ -3479,7 +3480,7 @@ async def _run_slicer_with_fallback(
         primary_bytes = _sanitize_project_settings_sentinels(primary_bytes)
 
     used_embedded_settings = False
-    service = SlicerApiService(api_url)
+    service = SlicerApiService(api_url, timeout_seconds=await get_stall_timeout_seconds(db))
 
     # #1493: cross-nozzle-class re-slice (single <-> dual). Without
     # intervention the slicer rejects with either "G-code in unprintable

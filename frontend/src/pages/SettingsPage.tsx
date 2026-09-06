@@ -107,6 +107,7 @@ const AUTOSAVE_SETTING_KEYS = [
   'open_in_slicer',
   'use_slicer_api',
   'orcaslicer_api_url',
+  'slicer_stall_timeout_minutes',
   'bambu_studio_api_url',
   'prometheus_enabled',
   'prometheus_token',
@@ -153,6 +154,8 @@ function comparableAutosaveValue(settings: AppSettings, key: AutosaveSettingKey)
     case 'chamber_temp_presets':
     case 'fan_speed_presets':
       return settings[key] ?? '';
+    case 'slicer_stall_timeout_minutes':
+      return Number(settings[key] ?? 15);
     case 'library_archive_mode':
       return settings[key] ?? 'ask';
     case 'library_disk_warning_gb':
@@ -4427,6 +4430,26 @@ export function SettingsPage() {
                       'settings.slicerApiUrlDescription',
                       'URL of the slicer-API sidecar container. Leave blank to use the SLICER_API_URL / BAMBU_STUDIO_API_URL env var defaults.',
                     )}
+                  </p>
+                </div>
+              )}
+              {(localSettings.use_slicer_api ?? false) && (
+                <div>
+                  <label className="block text-sm text-bambu-gray mb-1">
+                    {t('settings.slicerStallTimeout')}
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={240}
+                    value={localSettings.slicer_stall_timeout_minutes ?? 15}
+                    onChange={(e) =>
+                      updateSetting('slicer_stall_timeout_minutes', Number(e.target.value))
+                    }
+                    className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                  />
+                  <p className="text-xs text-bambu-gray mt-1">
+                    {t('settings.slicerStallTimeoutDescription')}
                   </p>
                 </div>
               )}
