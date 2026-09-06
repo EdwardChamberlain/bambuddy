@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import RequirePermissionIfAuthEnabled, caller_is_api_key, require_energy_cost_update
@@ -553,22 +553,14 @@ async def update_spoolman_settings(
         now_enabled = new_val == "true"
         await set_setting(db, "spoolman_enabled", new_val)
 
-        # Switching to Spoolman: clear built-in inventory slot assignments
-        if not was_enabled and now_enabled:
-            from backend.app.models.spool_assignment import SpoolAssignment
-
-            result = await db.execute(delete(SpoolAssignment))
-            logger.info("Cleared %d spool assignments on switch to Spoolman mode", result.rowcount)
-        # Switching back to internal mode: clear Spoolman slot assignments — the
-        # symmetric counterpart of the clear above. Without this, stale
-        # spoolman_slot_assignments rows linger and would wrongly count as
-        # "assigned" in any mode-agnostic check (e.g. the missing-spool-
-        # assignment notification, which unions both tables — #1473).
-        elif was_enabled and not now_enabled:
-            from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
-
-            result = await db.execute(delete(SpoolmanSlotAssignment))
-            logger.info("Cleared %d Spoolman slot assignments on switch to internal mode", result.rowcount)
+        # Keep each mode's assignment table intact so switching modes is
+        # reversible (#2812). Readers select the table belonging to the active
+        # mode rather than deleting the inactive table here.
+        if was_enabled != now_enabled:
+            logger.info(
+                "Inventory mode switched to %s; slot assignments in both tables kept",
+                "Spoolman" if now_enabled else "built-in",
+            )
     if "spoolman_url" in settings:
         await set_setting(db, "spoolman_url", normalize_str_setting("spoolman_url", settings["spoolman_url"]))
     if "spoolman_sync_mode" in settings:
