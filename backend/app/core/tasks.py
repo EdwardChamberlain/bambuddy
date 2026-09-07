@@ -55,6 +55,13 @@ def spawn_background_task(
         cancel later can store it on a service instance.
     """
     task = asyncio.create_task(coro, name=name)
+    # Tests may replace asyncio.create_task with a mock. Do not let a mocked
+    # return value enter the process-wide registry and fail later during
+    # shutdown cleanup.
+    if not isinstance(task, asyncio.Task):
+        logger.warning("Background task factory returned a non-Task; skipping tracking")
+        return task
+
     _background_tasks.add(task)
     task.add_done_callback(_on_task_done)
     return task
@@ -92,7 +99,13 @@ async def cancel_background_tasks(*, timeout: float = 1.0) -> None:
     must finish while the event loop is still alive. Call this before closing
     the loop or disposing the database engine.
     """
-    tasks = tuple(_background_tasks)
+    tracked = tuple(_background_tasks)
+    tasks = tuple(task for task in tracked if isinstance(task, asyncio.Task))
+    invalid = tuple(task for task in tracked if not isinstance(task, asyncio.Task))
+    if invalid:
+        logger.warning("Discarding %d invalid background-task registry entries", len(invalid))
+        _background_tasks.difference_update(invalid)
+
     for task in tasks:
         if not task.done():
             task.cancel()

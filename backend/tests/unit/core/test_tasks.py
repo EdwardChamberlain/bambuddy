@@ -10,6 +10,7 @@ through the logger, and auto-removes finished tasks.
 
 import asyncio
 import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -102,6 +103,20 @@ async def test_task_name_propagates():
     task = spawn_background_task(asyncio.sleep(0), name="named-spawn-test")
     assert task.get_name() == "named-spawn-test"
     await task
+
+
+@pytest.mark.asyncio
+async def test_mocked_task_factory_result_is_not_tracked():
+    """Mocked create_task results must not poison shutdown cleanup."""
+    coro = asyncio.sleep(0)
+    try:
+        with patch.object(asyncio, "create_task", return_value=MagicMock()):
+            result = spawn_background_task(coro, name="mocked-task")
+
+        assert active_task_count() == 0
+        assert isinstance(result, MagicMock)
+    finally:
+        coro.close()
 
 
 @pytest.mark.asyncio
