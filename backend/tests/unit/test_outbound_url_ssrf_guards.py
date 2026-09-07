@@ -145,6 +145,57 @@ def test_public_tier_rejects_hostname_resolving_to_private_address(monkeypatch):
         assert_safe_public_https_url("https://attacker.example/")
 
 
+@pytest.mark.asyncio
+async def test_public_transport_pins_the_validated_dns_address(monkeypatch):
+    """The socket destination must be the address checked by the SSRF guard."""
+    from backend.app.api.routes._oidc_helpers import _PublicAddressBackend
+
+    seen_hosts = []
+
+    class FakeNetworkBackend:
+        async def connect_tcp(self, host, port, **kwargs):
+            seen_hosts.append((host, port))
+            return object()
+
+    def fake_getaddrinfo(*_args, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    backend = _PublicAddressBackend(FakeNetworkBackend())
+
+    await backend.connect_tcp("attacker.example", 443)
+
+    assert seen_hosts == [("93.184.216.34", 443)]
+
+
+@pytest.mark.asyncio
+async def test_public_transport_rechecks_dns_before_connecting(monkeypatch):
+    """A private DNS answer after validation must never reach the socket."""
+    from backend.app.api.routes._oidc_helpers import _PublicAddressBackend
+
+    answers = iter(
+        [
+            [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))],
+            [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 443))],
+        ]
+    )
+    connected = False
+
+    class FakeNetworkBackend:
+        async def connect_tcp(self, host, port, **kwargs):
+            nonlocal connected
+            connected = True
+            return object()
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: next(answers))
+    assert_safe_public_https_url("https://attacker.example/")
+
+    with pytest.raises(ValueError, match="loopback"):
+        await _PublicAddressBackend(FakeNetworkBackend()).connect_tcp("attacker.example", 443)
+
+    assert connected is False
+
+
 # ---------------------------------------------------------------------------
 # OIDC issuer_url — the encoding bypasses the hand-rolled validator missed
 # ---------------------------------------------------------------------------

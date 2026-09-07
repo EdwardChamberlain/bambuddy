@@ -14,6 +14,8 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+import httpx
+
 from backend.app.api.routes._url_safety import (
     CLOUD_METADATA_HOSTNAMES,
     CLOUD_METADATA_IPS,
@@ -44,6 +46,36 @@ def _assert_safe_public_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Addr
         raise ValueError("icon URL must not point to a private (RFC-1918) address")
 
 
+def _resolve_public_addresses(hostname: str, port: int) -> tuple[str, ...]:
+    """Resolve *hostname* and return only addresses safe to connect to."""
+    try:
+        addr = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            address_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except (OSError, ValueError) as exc:
+            raise ValueError("icon URL hostname could not be resolved") from exc
+        if not address_infos:
+            raise ValueError("icon URL hostname could not be resolved")
+
+        addresses: list[str] = []
+        for address_info in address_infos:
+            sockaddr = address_info[4]
+            address_text = sockaddr[0] if sockaddr else ""
+            try:
+                resolved = ipaddress.ip_address(address_text.split("%", 1)[0])
+            except ValueError:
+                raise ValueError("icon URL hostname resolved to an invalid address") from None
+            _assert_safe_public_address(resolved)
+            address = str(resolved)
+            if address not in addresses:
+                addresses.append(address)
+        return tuple(addresses)
+
+    _assert_safe_public_address(addr)
+    return (str(addr),)
+
+
 def assert_safe_public_https_url(url: str, *, resolve_hostname: bool = True) -> None:
     """Raise ValueError if *url* is unsafe to fetch as a public HTTPS resource.
 
@@ -67,11 +99,10 @@ def assert_safe_public_https_url(url: str, *, resolve_hostname: bool = True) -> 
       check so an attacker can't bypass via IPv6 encoding.
 
     Symbolic hostnames are resolved when this guard protects an outbound
-    request. Every returned address must be public. A temporary DNS failure is
-    not treated as a policy violation because the request will fail closed at
-    connection time; a private answer is always rejected. Schema validation
-    can pass ``resolve_hostname=False`` to remain deterministic and
-    network-free, while the fetch path must retain the default.
+    request. Every returned address must be public. DNS failures fail closed
+    for outbound requests. Schema validation can pass
+    ``resolve_hostname=False`` to remain deterministic and network-free, while
+    the fetch path must retain the default.
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() != "https":
@@ -97,23 +128,51 @@ def assert_safe_public_https_url(url: str, *, resolve_hostname: bool = True) -> 
         if not resolve_hostname:
             return
 
-        # Validate every address returned by DNS. Do not fail open when a
-        # resolver returns a mixed public/private answer. If the name is
-        # temporarily unresolvable, httpx will fail the eventual request;
-        # there is no safe address to connect to in that case.
-        try:
-            port = parsed.port or 443
-            addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-        except (OSError, ValueError):
-            return
-        for address_info in addresses:
-            sockaddr = address_info[4]
-            address_text = sockaddr[0] if sockaddr else ""
-            try:
-                resolved = ipaddress.ip_address(address_text.split("%", 1)[0])
-            except ValueError:
-                raise ValueError("icon URL hostname resolved to an invalid address") from None
-            _assert_safe_public_address(resolved)
+        _resolve_public_addresses(hostname, parsed.port or 443)
         return
 
     _assert_safe_public_address(addr)
+
+
+class _PublicAddressBackend:
+    """httpcore backend that pins each connection to a validated address."""
+
+    def __init__(self, delegate=None) -> None:
+        if delegate is None:
+            from httpcore._backends.auto import AutoBackend
+
+            delegate = AutoBackend()
+        self._delegate = delegate
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        if isinstance(host, bytes):
+            host = host.decode("ascii")
+        addresses = _resolve_public_addresses(host, port)
+        return await self._delegate.connect_tcp(
+            addresses[0],
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return await self._delegate.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    async def sleep(self, seconds):
+        await self._delegate.sleep(seconds)
+
+
+class _PublicAddressTransport(httpx.AsyncHTTPTransport):
+    """HTTP transport that preserves TLS SNI while pinning DNS destinations."""
+
+    def __init__(self) -> None:
+        # OIDC URLs must connect directly. An environment proxy would receive
+        # the hostname and perform its own DNS lookup, bypassing this policy.
+        super().__init__(trust_env=False)
+        self._pool._network_backend = _PublicAddressBackend()
+
+
+def public_https_transport() -> httpx.AsyncHTTPTransport:
+    """Return the SSRF-safe transport for public OIDC requests."""
+    return _PublicAddressTransport()

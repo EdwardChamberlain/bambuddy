@@ -26,6 +26,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from backend.app.api.routes._oidc_helpers import public_https_transport
+
 logger = logging.getLogger(__name__)
 
 
@@ -130,7 +132,11 @@ async def fetch_icon(url: str) -> tuple[bytes, str, str]:
 
     try:
         async with (
-            httpx.AsyncClient(timeout=_FETCH_TIMEOUT_SECONDS) as client,
+            httpx.AsyncClient(
+                timeout=_FETCH_TIMEOUT_SECONDS,
+                transport=public_https_transport(),
+                trust_env=False,
+            ) as client,
             client.stream("GET", url, follow_redirects=False) as response,
         ):
             if response.status_code != 200:
