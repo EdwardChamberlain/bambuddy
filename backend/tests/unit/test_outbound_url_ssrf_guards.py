@@ -124,6 +124,7 @@ def test_public_tier_rejects_universally_dangerous_targets(url: str):
         "https://127.0.0.1/",
         "https://192.168.1.5/",
         "https://10.1.2.3/",
+        "https://100.64.0.1/",
         "https://[fe80::1]/",
         "https://[::ffff:127.0.0.1]/",
         "http://accounts.google.com/",  # scheme must be https
@@ -142,6 +143,21 @@ def test_public_tier_rejects_hostname_resolving_to_private_address(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     with pytest.raises(ValueError, match="loopback"):
+        assert_safe_public_https_url("https://attacker.example/", resolve_hostname=True)
+
+
+def test_public_tier_rejects_shared_address_space():
+    """CGNAT/shared space is not private in ``ipaddress`` but is not global."""
+    with pytest.raises(ValueError, match="globally routable"):
+        assert_safe_public_https_url("https://100.64.0.1/")
+
+
+def test_public_tier_rejects_hostname_resolving_to_shared_address(monkeypatch):
+    def fake_getaddrinfo(*_args, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("100.64.0.1", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError, match="globally routable"):
         assert_safe_public_https_url("https://attacker.example/", resolve_hostname=True)
 
 

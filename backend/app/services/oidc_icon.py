@@ -171,6 +171,11 @@ async def fetch_icon(url: str) -> tuple[bytes, str, str]:
         # typically null bytes or control chars. Map to URL-error path so
         # the admin sees a 400, not a 500.
         raise OIDCIconUrlError(f"Invalid icon URL: {exc}") from exc
+    except ValueError as exc:
+        # The SSRF-safe transport raises ValueError when connect-time DNS
+        # validation rejects a non-global/private destination. Keep that
+        # policy failure in the icon API's documented 400 error contract.
+        raise OIDCIconUrlError(str(exc)) from exc
     except httpx.HTTPError as exc:
         raise OIDCIconUnavailableError(f"Icon fetch failed: {exc}") from exc
 

@@ -44,6 +44,8 @@ def _assert_safe_public_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Addr
         raise ValueError("icon URL must not point to a multicast address")
     if effective.is_private:
         raise ValueError("icon URL must not point to a private (RFC-1918) address")
+    if not effective.is_global:
+        raise ValueError("icon URL must point to a globally routable address")
 
 
 def _resolve_public_addresses(hostname: str, port: int) -> tuple[str, ...]:
