@@ -21,13 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.api.routes.cloud import resolve_api_key_cloud_owner
+from backend.app.core import database
 from backend.app.core.auth import (
     RequireCameraStreamTokenIfAuthEnabled,
     require_ownership_permission,
     require_permission_if_auth_enabled,
 )
 from backend.app.core.config import settings as app_settings
-from backend.app.core.database import async_session, get_db
+from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.core.tasks import spawn_background_task
 from backend.app.models.archive import PrintArchive
@@ -662,6 +663,15 @@ def create_image_thumbnail(file_path: Path, thumbnails_dir: Path, max_size: int 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 
 
+def _external_stl_needs_backfill(file_path: str | None) -> bool:
+    """Return whether an external STL is large enough for thumbnail work."""
+    try:
+        path = to_absolute_path(file_path)
+        return path is not None and path.stat().st_size >= MIN_USABLE_STL_BYTES
+    except (OSError, ValueError):
+        return False
+
+
 async def _backfill_external_stl_thumbnails(folder_ids: list[int]) -> None:
     """Generate STL thumbnails for an external folder tree in the background.
 
@@ -681,7 +691,7 @@ async def _backfill_external_stl_thumbnails(folder_ids: list[int]) -> None:
     if not folder_ids:
         return
     thumbnails_dir = get_library_thumbnails_dir()
-    async with async_session() as db:
+    async with database.async_session() as db:
         result = await db.execute(
             LibraryFile.active().where(
                 LibraryFile.folder_id.in_(folder_ids),
@@ -1538,6 +1548,16 @@ async def scan_external_folder(
         )
     )
     existing_files = {f.file_path: f for f in existing_result.scalars().all()}
+    stl_backfill_folder_ids = {
+        file.folder_id
+        for file in existing_files.values()
+        if (
+            file.folder_id is not None
+            and file.file_type == "stl"
+            and file.thumbnail_path is None
+            and _external_stl_needs_backfill(file.file_path)
+        )
+    }
 
     # Build folder cache: relative path -> folder_id (for resolving subfolders)
     # Pre-populate with existing child folders keyed by their external_path
@@ -1646,6 +1666,8 @@ async def scan_external_folder(
                 continue
 
             file_type = classify_file_type(filename)
+            if file_type == "stl" and _external_stl_needs_backfill(file_path_str):
+                stl_backfill_folder_ids.add(target_folder_id)
 
             # Extract thumbnail for 3mf files (including .gcode.3mf sliced
             # outputs — those are 3MF zips on disk and carry the same
@@ -1765,18 +1787,19 @@ async def scan_external_folder(
 
     await db.commit()
 
-    # Spawn STL thumbnail backfill in the background — the scan endpoint
+    # Spawn STL thumbnail backfill in the background when there is usable STL
+    # work to do — the scan endpoint
     # returns immediately so the FE modal closes and subdirectories are
     # visible right away; thumbnails fill in over the following seconds /
     # minutes as the task processes each STL file. Survives FE refresh —
     # the task lives in the FastAPI event loop, not the request scope.
-    # folder_cache.values() covers the root + every pre-existing subfolder
-    # + every subfolder created during this scan. all_folder_ids on its own
-    # would miss the newly-created ones (it's snapshotted before the walk).
-    spawn_background_task(
-        _backfill_external_stl_thumbnails(list(set(folder_cache.values()))),
-        name=f"stl-backfill-folder-{folder_id}",
-    )
+    # stl_backfill_folder_ids includes both existing unthumbnailed STL rows and
+    # newly discovered usable STL files, including files in new subfolders.
+    if stl_backfill_folder_ids:
+        spawn_background_task(
+            _backfill_external_stl_thumbnails(sorted(stl_backfill_folder_ids)),
+            name=f"stl-backfill-folder-{folder_id}",
+        )
 
     return {"status": "success", "added": added, "removed": removed}
 
