@@ -786,6 +786,60 @@ class TestQueueOwnershipPermissions(TestOwnershipPermissionsSetup):
 class TestLibraryOwnershipPermissions(TestOwnershipPermissionsSetup):
     """Tests for library file ownership-based permissions."""
 
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_read_own_cannot_poll_another_users_slice_job(
+        self, async_client: AsyncClient, auth_setup, db_session
+    ):
+        """Slice-job results must follow the source owner's read boundary."""
+        from backend.app.core.auth import generate_api_key
+        from backend.app.models.api_key import APIKey
+        from backend.app.services.slice_dispatch import SliceJob, slice_dispatch
+
+        full_key, key_hash, key_prefix = generate_api_key()
+        db_session.add(
+            APIKey(
+                name="slice-job-reader-key",
+                key_hash=key_hash,
+                key_prefix=key_prefix,
+                user_id=auth_setup["operator2_user"]["id"],
+                can_read_status=True,
+            )
+        )
+        await db_session.commit()
+
+        job = SliceJob(
+            id=990001,
+            kind="library_file",
+            source_id=123,
+            source_name="operator1-private.3mf",
+            owner_id=auth_setup["operator_user"]["id"],
+            status="completed",
+            result={"library_file_id": 456},
+        )
+        slice_dispatch._jobs[job.id] = job
+        try:
+            jwt_response = await async_client.get(
+                f"/api/v1/slice-jobs/{job.id}",
+                headers={"Authorization": f"Bearer {auth_setup['operator2_token']}"},
+            )
+            assert jwt_response.status_code == 404
+
+            api_key_response = await async_client.get(
+                f"/api/v1/slice-jobs/{job.id}",
+                headers={"X-API-Key": full_key},
+            )
+            assert api_key_response.status_code == 404
+
+            owner_response = await async_client.get(
+                f"/api/v1/slice-jobs/{job.id}",
+                headers={"Authorization": f"Bearer {auth_setup['operator_token']}"},
+            )
+            assert owner_response.status_code == 200
+            assert owner_response.json()["source_name"] == "operator1-private.3mf"
+        finally:
+            slice_dispatch._jobs.pop(job.id, None)
+
     @pytest.fixture
     async def library_file_factory(self, db_session):
         """Factory to create test library files."""

@@ -137,6 +137,12 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     # administrative because it removes the statistics contribution (#1888).
     Permission.ARCHIVES_UPDATE_OWN: "can_manage_archives",
     Permission.ARCHIVES_DELETE_OWN: "can_manage_archives",
+    # Projects are a separate explicit global capability. Project rows do not
+    # carry an owner field, so this is intentionally not routed through the
+    # own/all ownership dependency used by archives and library files.
+    Permission.PROJECTS_CREATE: "can_manage_projects",
+    Permission.PROJECTS_UPDATE: "can_manage_projects",
+    Permission.PROJECTS_DELETE: "can_manage_projects",
     # can_access_cloud — narrow opt-in scope, gated by the router-level
     # ``_cloud_api_key_gate`` and additionally enforced here so the route-
     # level ``cloud_caller(Permission.CLOUD_AUTH)`` dep also fails closed
@@ -178,7 +184,7 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.GITHUB_BACKUP,
         Permission.GITHUB_RESTORE,
         Permission.FIRMWARE_UPDATE,
-        # Resource administration (printer/project/filament/maintenance/k-profile/etc CRUD).
+        # Resource administration (printer/filament/maintenance/k-profile/etc CRUD).
         # API keys with the operational scopes can read these resources via
         # *_READ permissions but cannot mutate the catalog/registry itself.
         Permission.PRINTERS_CREATE,
@@ -197,9 +203,6 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
         # allowed through the owner-resolving ownership dependency; folder and
         # batch operations that require ALL remain admin/JWT-only.
         Permission.LIBRARY_PURGE,
-        Permission.PROJECTS_CREATE,
-        Permission.PROJECTS_UPDATE,
-        Permission.PROJECTS_DELETE,
         Permission.FILAMENTS_CREATE,
         Permission.FILAMENTS_UPDATE,
         Permission.FILAMENTS_DELETE,

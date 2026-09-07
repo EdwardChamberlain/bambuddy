@@ -81,6 +81,24 @@ class TestApiKeyRbacAllowed:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_api_key_can_create_project_with_project_scope(
+        self, async_client: AsyncClient, db_session, api_key_data
+    ):
+        """The advertised project scope must reach the project route."""
+        from backend.app.models.settings import Settings
+
+        db_session.add(Settings(key="auth_enabled", value="true"))
+        await db_session.commit()
+
+        resp = await async_client.post(
+            "/api/v1/projects/",
+            json={"name": "API-key project"},
+            headers={"X-API-Key": api_key_data},
+        )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_api_key_can_access_inventory_read(
         self, async_client: AsyncClient, db_session, api_key_data, spoolman_settings
     ):
@@ -142,9 +160,6 @@ class TestApiKeyDenylistIntegrity:
             Permission.ARCHIVES_DELETE_ALL,
             Permission.LIBRARY_UPDATE_ALL,
             Permission.LIBRARY_DELETE_ALL,
-            Permission.PROJECTS_CREATE,
-            Permission.PROJECTS_UPDATE,
-            Permission.PROJECTS_DELETE,
         }
         missing = expected_denied - _APIKEY_DENIED_PERMISSIONS
         assert not missing, (
@@ -224,6 +239,7 @@ class TestApiKeyScopeAllowlist:
             "can_manage_library",
             "can_manage_inventory",
             "can_manage_archives",
+            "can_manage_projects",
             "can_access_cloud",
         }
         used_flags = set(_APIKEY_SCOPE_BY_PERMISSION.values())
@@ -251,6 +267,7 @@ class TestApiKeyScopeAllowlist:
             "can_manage_library",
             "can_manage_inventory",
             "can_manage_archives",
+            "can_manage_projects",
             "can_access_cloud",
         ],
     )
@@ -328,6 +345,11 @@ class TestCheckApiKeyPermissionsMatrix:
         # can_manage_archives — archive CRUD, excluding destructive purge.
         ("ARCHIVES_UPDATE_OWN", "can_manage_archives", "edit own archive"),
         ("ARCHIVES_DELETE_OWN", "can_manage_archives", "delete own archive"),
+        # can_manage_projects — project CRUD is an explicit global scope
+        # because Project has no row-owner field.
+        ("PROJECTS_CREATE", "can_manage_projects", "create project"),
+        ("PROJECTS_UPDATE", "can_manage_projects", "update project"),
+        ("PROJECTS_DELETE", "can_manage_projects", "delete project"),
     ]
 
     _ADMIN_CASES = [
@@ -349,9 +371,6 @@ class TestCheckApiKeyPermissionsMatrix:
         "ARCHIVES_CREATE",
         "ARCHIVES_UPDATE_ALL",
         "ARCHIVES_DELETE_ALL",
-        "PROJECTS_CREATE",
-        "PROJECTS_UPDATE",
-        "PROJECTS_DELETE",
         "LIBRARY_PURGE",
         "DISCOVERY_SCAN",
     ]
@@ -384,6 +403,7 @@ class TestCheckApiKeyPermissionsMatrix:
                 "can_manage_library",
                 "can_manage_inventory",
                 "can_manage_archives",
+                "can_manage_projects",
             )
             if f != required_flag
         }
