@@ -97,7 +97,8 @@ async def cancel_background_tasks(*, timeout: float = 1.0) -> None:
 
     Background tasks may own database sessions whose aiosqlite worker threads
     must finish while the event loop is still alive. Call this before closing
-    the loop or disposing the database engine.
+    the loop or disposing the database engine. Tasks that suppress
+    cancellation remain tracked and are reported after the bounded wait.
     """
     tracked = tuple(_background_tasks)
     tasks = tuple(task for task in tracked if isinstance(task, asyncio.Task))
@@ -106,21 +107,23 @@ async def cancel_background_tasks(*, timeout: float = 1.0) -> None:
         logger.warning("Discarding %d invalid background-task registry entries", len(invalid))
         _background_tasks.difference_update(invalid)
 
+    if not tasks:
+        return
+
     for task in tasks:
         if not task.done():
             task.cancel()
 
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
-            timeout=timeout,
-        )
-    except TimeoutError:
-        pending = [task.get_name() for task in tasks if not task.done()]
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    if pending:
+        pending_names = [task.get_name() for task in pending]
         logger.warning(
-            "Timed out waiting %.1fs for background tasks to stop: %s",
+            "Timed out waiting %.2fs for background tasks to stop: %s",
             timeout,
-            ", ".join(pending) if pending else "unknown",
+            ", ".join(pending_names),
         )
-    finally:
-        _background_tasks.difference_update(tasks)
+
+    # Keep pending tasks strongly referenced so their done callbacks can remove
+    # them when they eventually finish. Dropping them here would recreate the
+    # pending-task warnings this cleanup is intended to prevent.
+    _background_tasks.difference_update(done)

@@ -133,3 +133,32 @@ async def test_cancel_background_tasks_waits_for_shutdown():
 
     assert task.cancelled()
     assert active_task_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_has_hard_timeout(caplog):
+    """Cancellation-resistant tasks must not block shutdown indefinitely."""
+    release = asyncio.Event()
+
+    async def ignores_cancellation() -> None:
+        try:
+            await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+            await release.wait()
+
+    task = spawn_background_task(ignores_cancellation(), name="stubborn-task")
+    await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING, logger="backend.app.core.tasks"):
+        await cancel_background_tasks(timeout=0.01)
+
+    assert not task.done()
+    assert active_task_count() == 1
+    assert any("stubborn-task" in record.message for record in caplog.records)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert active_task_count() == 0
