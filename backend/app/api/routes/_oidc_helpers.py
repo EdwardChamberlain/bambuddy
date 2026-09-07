@@ -76,7 +76,7 @@ def _resolve_public_addresses(hostname: str, port: int) -> tuple[str, ...]:
     return (str(addr),)
 
 
-def assert_safe_public_https_url(url: str, *, resolve_hostname: bool = True) -> None:
+def assert_safe_public_https_url(url: str, *, resolve_hostname: bool = False) -> None:
     """Raise ValueError if *url* is unsafe to fetch as a public HTTPS resource.
 
     Used for OIDC provider icon URLs (#1333) and OIDC issuer URLs. Stricter
@@ -98,11 +98,12 @@ def assert_safe_public_https_url(url: str, *, resolve_hostname: bool = True) -> 
     - IPv4-mapped IPv6 (``::ffff:127.0.0.1``) — unwrapped before the IP-class
       check so an attacker can't bypass via IPv6 encoding.
 
-    Symbolic hostnames are resolved when this guard protects an outbound
-    request. Every returned address must be public. DNS failures fail closed
-    for outbound requests. Schema validation can pass
-    ``resolve_hostname=False`` to remain deterministic and network-free, while
-    the fetch path must retain the default.
+    Symbolic hostnames are not resolved by default so schema validation and
+    callers that only need syntactic checks remain deterministic and
+    network-free. Callers performing an outbound request may opt in with
+    ``resolve_hostname=True``; the OIDC HTTP clients use
+    ``public_https_transport()``, which performs the authoritative check again
+    immediately before connecting to prevent DNS rebinding.
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() != "https":

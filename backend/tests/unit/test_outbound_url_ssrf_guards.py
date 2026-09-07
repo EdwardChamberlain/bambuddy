@@ -142,7 +142,7 @@ def test_public_tier_rejects_hostname_resolving_to_private_address(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     with pytest.raises(ValueError, match="loopback"):
-        assert_safe_public_https_url("https://attacker.example/")
+        assert_safe_public_https_url("https://attacker.example/", resolve_hostname=True)
 
 
 @pytest.mark.asyncio
@@ -188,7 +188,7 @@ async def test_public_transport_rechecks_dns_before_connecting(monkeypatch):
             return object()
 
     monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: next(answers))
-    assert_safe_public_https_url("https://attacker.example/")
+    assert_safe_public_https_url("https://attacker.example/", resolve_hostname=True)
 
     with pytest.raises(ValueError, match="loopback"):
         await _PublicAddressBackend(FakeNetworkBackend()).connect_tcp("attacker.example", 443)

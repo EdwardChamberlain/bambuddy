@@ -356,8 +356,8 @@ def _validate_icon_url(v: str | None) -> str | None:
 
     try:
         # Keep Pydantic validation deterministic and network-free. The
-        # request paths call the same guard with DNS resolution enabled before
-        # making an outbound connection.
+        # outbound transport performs the authoritative DNS check immediately
+        # before making a connection.
         assert_safe_public_https_url(v, resolve_hostname=False)
     except ValueError as exc:
         raise ValueError(f"icon_url: {exc}") from exc
@@ -391,8 +391,8 @@ def _validate_issuer_url(v: str | None) -> str | None:
 
     try:
         # Keep Pydantic validation deterministic and network-free. The
-        # request paths call the same guard with DNS resolution enabled before
-        # making an outbound connection.
+        # outbound transport performs the authoritative DNS check immediately
+        # before making a connection.
         assert_safe_public_https_url(v, resolve_hostname=False)
     except ValueError as exc:
         # The guard's messages say "icon URL" — rewrite for this field so the
