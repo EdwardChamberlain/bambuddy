@@ -1778,3 +1778,102 @@ class TestSliceOwnershipPermissions(TestOwnershipPermissionsSetup):
             headers={"Authorization": f"Bearer {auth_setup['admin_token']}"},
         )
         assert admin.status_code == 200
+
+
+class TestProjectOwnershipBoundaries(TestOwnershipPermissionsSetup):
+    """Project child routes must retain the API-key owner's row boundary."""
+
+    @pytest.fixture
+    async def project_api_key(self, db_session, auth_setup):
+        from backend.app.core.auth import generate_api_key
+        from backend.app.models.api_key import APIKey
+
+        full_key, key_hash, key_prefix = generate_api_key()
+        db_session.add(
+            APIKey(
+                name="operator-project-key",
+                key_hash=key_hash,
+                key_prefix=key_prefix,
+                user_id=auth_setup["operator_user"]["id"],
+                can_read_status=True,
+                can_manage_projects=True,
+            )
+        )
+        await db_session.commit()
+        return full_key
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_api_key_project_routes_only_expose_owned_children(
+        self,
+        async_client: AsyncClient,
+        db_session,
+        auth_setup,
+        archive_factory,
+        printer_factory,
+        project_api_key,
+    ):
+        from backend.app.models.print_queue import PrintQueueItem
+        from backend.app.models.project import Project
+
+        project = Project(name="Shared project")
+        db_session.add(project)
+        await db_session.flush()
+
+        printer = await printer_factory()
+        owned_archive = await archive_factory(
+            printer.id,
+            print_name="Owned archive",
+            created_by_id=auth_setup["operator_user"]["id"],
+            project_id=project.id,
+        )
+        other_archive = await archive_factory(
+            printer.id,
+            print_name="Other archive",
+            created_by_id=auth_setup["operator2_user"]["id"],
+            project_id=project.id,
+        )
+        owned_item = PrintQueueItem(
+            printer_id=printer.id,
+            archive_id=owned_archive.id,
+            project_id=project.id,
+            created_by_id=auth_setup["operator_user"]["id"],
+            status="pending",
+            position=1,
+        )
+        other_item = PrintQueueItem(
+            printer_id=printer.id,
+            archive_id=other_archive.id,
+            project_id=project.id,
+            created_by_id=auth_setup["operator2_user"]["id"],
+            status="pending",
+            position=2,
+        )
+        db_session.add_all([owned_item, other_item])
+        await db_session.commit()
+
+        headers = {"X-API-Key": project_api_key}
+        archives_response = await async_client.get(f"/api/v1/projects/{project.id}/archives", headers=headers)
+        assert archives_response.status_code == 200, archives_response.text
+        assert [item["id"] for item in archives_response.json()] == [owned_archive.id]
+
+        queue_response = await async_client.get(f"/api/v1/projects/{project.id}/queue", headers=headers)
+        assert queue_response.status_code == 200, queue_response.text
+        assert [item["id"] for item in queue_response.json()] == [owned_item.id]
+
+        timeline_response = await async_client.get(f"/api/v1/projects/{project.id}/timeline", headers=headers)
+        assert timeline_response.status_code == 200, timeline_response.text
+        timeline = timeline_response.json()
+        assert all((event.get("metadata") or {}).get("archive_id") != other_archive.id for event in timeline)
+        assert all((event.get("metadata") or {}).get("queue_item_id") != other_item.id for event in timeline)
+
+        remove_response = await async_client.post(
+            f"/api/v1/projects/{project.id}/remove-archives",
+            headers=headers,
+            json={"archive_ids": [other_archive.id]},
+        )
+        assert remove_response.status_code == 200, remove_response.text
+        assert "Removed 0" in remove_response.json()["message"]
+
+        await db_session.refresh(other_archive)
+        assert other_archive.project_id == project.id

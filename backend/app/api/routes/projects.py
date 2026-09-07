@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.api.routes.library import get_library_dir
-from backend.app.core.auth import RequireCameraStreamTokenIfAuthEnabled, RequirePermissionIfAuthEnabled
+from backend.app.core.auth import (
+    RequireCameraStreamTokenIfAuthEnabled,
+    RequirePermissionIfAuthEnabled,
+    resolve_api_key_owner,
+)
 from backend.app.core.config import settings
 from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
@@ -677,6 +681,7 @@ async def list_project_archives(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_READ),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """List archives in a project."""
     # Verify project exists
@@ -693,7 +698,10 @@ async def list_project_archives(
     query = (
         select(PrintArchive)
         .options(selectinload(PrintArchive.project), selectinload(PrintArchive.created_by))
-        .where(PrintArchive.project_id == project_id)
+        .where(
+            PrintArchive.project_id == project_id,
+            *([PrintArchive.created_by_id == api_key_owner.id] if api_key_owner else []),
+        )
         .order_by(PrintArchive.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -716,6 +724,7 @@ async def list_project_queue(
     project_id: int,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_READ),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """List queue items in a project."""
     # Verify project exists
@@ -724,7 +733,14 @@ async def list_project_queue(
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Get queue items
-    query = select(PrintQueueItem).where(PrintQueueItem.project_id == project_id).order_by(PrintQueueItem.position)
+    query = (
+        select(PrintQueueItem)
+        .where(
+            PrintQueueItem.project_id == project_id,
+            *([PrintQueueItem.created_by_id == api_key_owner.id] if api_key_owner else []),
+        )
+        .order_by(PrintQueueItem.position)
+    )
     result = await db.execute(query)
     items = result.scalars().all()
 
@@ -737,6 +753,7 @@ async def add_archives_to_project(
     data: BatchAddArchives,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_UPDATE),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Batch add archives to a project."""
     # Verify project exists
@@ -747,7 +764,12 @@ async def add_archives_to_project(
     # Update archives
     updated = 0
     for archive_id in data.archive_ids:
-        result = await db.execute(select(PrintArchive).where(PrintArchive.id == archive_id))
+        result = await db.execute(
+            select(PrintArchive).where(
+                PrintArchive.id == archive_id,
+                *([PrintArchive.created_by_id == api_key_owner.id] if api_key_owner else []),
+            )
+        )
         archive = result.scalar_one_or_none()
         if archive:
             archive.project_id = project_id
@@ -762,6 +784,7 @@ async def add_queue_items_to_project(
     data: BatchAddQueueItems,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_UPDATE),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Batch add queue items to a project."""
     # Verify project exists
@@ -772,7 +795,12 @@ async def add_queue_items_to_project(
     # Update queue items
     updated = 0
     for item_id in data.queue_item_ids:
-        result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
+        result = await db.execute(
+            select(PrintQueueItem).where(
+                PrintQueueItem.id == item_id,
+                *([PrintQueueItem.created_by_id == api_key_owner.id] if api_key_owner else []),
+            )
+        )
         item = result.scalar_one_or_none()
         if item:
             item.project_id = project_id
@@ -787,6 +815,7 @@ async def remove_archives_from_project(
     data: BatchAddArchives,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_UPDATE),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Remove archives from a project (sets project_id to NULL)."""
     updated = 0
@@ -795,6 +824,7 @@ async def remove_archives_from_project(
             select(PrintArchive).where(
                 PrintArchive.id == archive_id,
                 PrintArchive.project_id == project_id,
+                *([PrintArchive.created_by_id == api_key_owner.id] if api_key_owner else []),
             )
         )
         archive = result.scalar_one_or_none()
@@ -1463,6 +1493,7 @@ async def get_project_timeline(
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_READ),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Get timeline of events for a project."""
     # Verify project exists
@@ -1486,7 +1517,10 @@ async def get_project_timeline(
     # Get archives and add events
     archives_result = await db.execute(
         select(PrintArchive)
-        .where(PrintArchive.project_id == project_id)
+        .where(
+            PrintArchive.project_id == project_id,
+            *([PrintArchive.created_by_id == api_key_owner.id] if api_key_owner else []),
+        )
         .order_by(PrintArchive.created_at.desc())
         .limit(limit)
     )
@@ -1521,20 +1555,32 @@ async def get_project_timeline(
     # Get queue items
     queue_result = await db.execute(
         select(PrintQueueItem)
-        .where(PrintQueueItem.project_id == project_id)
+        .options(
+            selectinload(PrintQueueItem.archive),
+            selectinload(PrintQueueItem.library_file),
+        )
+        .where(
+            PrintQueueItem.project_id == project_id,
+            *([PrintQueueItem.created_by_id == api_key_owner.id] if api_key_owner else []),
+        )
         .order_by(PrintQueueItem.created_at.desc())
         .limit(limit)
     )
     queue_items = queue_result.scalars().all()
 
     for item in queue_items:
+        item_name = (
+            (item.archive.print_name or item.archive.filename)
+            if item.archive
+            else (item.library_file.filename if item.library_file else f"Queue item {item.id}")
+        )
         if item.status == "printing":
             events.append(
                 TimelineEvent(
                     event_type="print_started",
                     timestamp=item.started_at or item.created_at,
                     title="Print started",
-                    description=item.print_name,
+                    description=item_name,
                     metadata={"queue_item_id": item.id},
                 )
             )
@@ -1544,7 +1590,7 @@ async def get_project_timeline(
                     event_type="queued",
                     timestamp=item.created_at,
                     title="Added to queue",
-                    description=item.print_name,
+                    description=item_name,
                     metadata={"queue_item_id": item.id},
                 )
             )
@@ -1564,6 +1610,7 @@ async def export_project(
     format: str = "zip",  # "zip" (with files) or "json" (metadata only)
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.PROJECTS_READ),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Export a project. Use format=zip (default) for full export with files, or format=json for metadata only."""
     result = await db.execute(select(Project).where(Project.id == project_id))
@@ -1603,7 +1650,12 @@ async def export_project(
     for folder in linked_folders:
         # Get files in this folder
         files_result = await db.execute(
-            LibraryFile.active().where(LibraryFile.folder_id == folder.id).order_by(LibraryFile.filename)
+            LibraryFile.active()
+            .where(
+                LibraryFile.folder_id == folder.id,
+                *([LibraryFile.created_by_id == api_key_owner.id] if api_key_owner else []),
+            )
+            .order_by(LibraryFile.filename)
         )
         files = files_result.scalars().all()
 

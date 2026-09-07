@@ -307,6 +307,14 @@ class _FakeApiKey:
         self.can_manage_projects = can_manage_projects
 
 
+class _FakeOwner:
+    def __init__(self, *permissions: str):
+        self.permissions = set(permissions)
+
+    def has_permission(self, permission: str) -> bool:
+        return permission in self.permissions
+
+
 class TestCheckApiKeyPermissionsMatrix:
     """Pure-logic matrix: every (scope flag combo × representative permission) outcome.
 
@@ -437,6 +445,22 @@ class TestCheckApiKeyPermissionsMatrix:
         with pytest.raises(HTTPException) as exc:
             _check_apikey_permissions(all_flags, ["bogus:nonexistent"])
         assert exc.value.status_code == 403
+
+    def test_owned_key_also_requires_owner_permission(self):
+        """An owned key cannot outrank the permissions of its active owner."""
+        from fastapi import HTTPException
+
+        from backend.app.core.auth import _check_apikey_permissions
+        from backend.app.core.permissions import Permission
+
+        key = _FakeApiKey(can_manage_projects=True)
+        permission = Permission.PROJECTS_UPDATE.value
+        _check_apikey_permissions(key, [permission], owner=_FakeOwner(permission))
+
+        with pytest.raises(HTTPException) as exc:
+            _check_apikey_permissions(key, [permission], owner=_FakeOwner())
+        assert exc.value.status_code == 403
+        assert "owner" in exc.value.detail.lower()
 
     def test_empty_perm_list_is_403(self):
         """Defence-in-depth: an empty perm list must not silently allow."""

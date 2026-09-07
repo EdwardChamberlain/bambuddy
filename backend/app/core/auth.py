@@ -241,7 +241,13 @@ def _resolve_apikey_scope(perm_string: str) -> str | None:
     return _APIKEY_SCOPE_BY_PERMISSION.get(perm)
 
 
-def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, require_any: bool = False) -> None:
+def _check_apikey_permissions(
+    api_key: APIKey,
+    perm_strings: list[str],
+    *,
+    owner: User | None = None,
+    require_any: bool = False,
+) -> None:
     """Raise 403 unless ``api_key`` is allowed to use ``perm_strings``.
 
     Allowlist semantics: every requested permission MUST be present in
@@ -252,6 +258,10 @@ def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, requi
     ``require_permission`` / ``require_permission_if_auth_enabled``).
     When ``require_any=True``, only one needs to pass (mirrors
     ``require_any_permission_if_auth_enabled``).
+
+    When an owned API key is used, the owner's normal group permissions are
+    an additional boundary. Legacy ownerless keys remain scope-only for
+    backwards compatibility.
     """
     if not perm_strings:
         # Defensive: empty perm list means the dep is auth-only, not perm-gated.
@@ -274,6 +284,11 @@ def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, requi
             failure = HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"API key does not have '{scope_attr}' permission",
+            )
+        elif owner is not None and not owner.has_permission(perm_str):
+            failure = HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"API key owner does not have '{perm_str}' permission",
             )
         else:
             failure = None
@@ -897,6 +912,39 @@ async def _user_from_api_key(db: AsyncSession, api_key: APIKey) -> User | None:
     return user
 
 
+async def _resolve_api_key_permission_owner(db: AsyncSession, api_key: APIKey) -> User | None:
+    """Resolve an owned key's active user for permission narrowing.
+
+    Ownerless keys predate API-key ownership and intentionally remain
+    scope-only. An owned key must never fall back to anonymous scope access
+    when its owner is missing or inactive.
+    """
+    if api_key.user_id is None:
+        return None
+
+    result = await db.execute(select(User).where(User.id == api_key.user_id).options(selectinload(User.groups)))
+    owner = result.scalar_one_or_none()
+    if owner is None or not owner.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key owner is deactivated or no longer exists",
+        )
+    return owner
+
+
+async def _authorize_api_key(
+    db: AsyncSession,
+    api_key: APIKey,
+    perm_strings: list[str],
+    *,
+    require_any: bool = False,
+) -> User | None:
+    """Check API-key scopes and, for owned keys, the owner's permissions."""
+    owner = await _resolve_api_key_permission_owner(db, api_key)
+    _check_apikey_permissions(api_key, perm_strings, owner=owner, require_any=require_any)
+    return owner
+
+
 async def resolve_api_key_owner(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
@@ -1423,7 +1471,7 @@ def require_permission(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, perm_strings)
+                    await _authorize_api_key(db, api_key, perm_strings)
                     return None  # API key valid, allow access
 
             credentials_exception = HTTPException(
@@ -1440,7 +1488,7 @@ def require_permission(*permissions: str | Permission):
             if token.startswith("bb_"):
                 api_key = await _validate_api_key(db, token)
                 if api_key:
-                    _check_apikey_permissions(api_key, perm_strings)
+                    await _authorize_api_key(db, api_key, perm_strings)
                     return None  # API key valid, allow access
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1513,7 +1561,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, perm_strings)
+                    await _authorize_api_key(db, api_key, perm_strings)
                     return None  # API key valid, allow access
 
             # Check for Bearer token (could be JWT or API key)
@@ -1523,7 +1571,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, perm_strings)
+                        await _authorize_api_key(db, api_key, perm_strings)
                         return None  # API key valid, allow access
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1616,7 +1664,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
                     # GHSA-r2qv-8222-hqg3: previously returned None unconditionally,
                     # letting any valid API key satisfy admin "any-of" route
                     # dependencies. require_any → at-least-one must pass the scope check.
-                    _check_apikey_permissions(api_key, perm_strings, require_any=True)
+                    await _authorize_api_key(db, api_key, perm_strings, require_any=True)
                     return None
 
             if credentials is not None:
@@ -1624,7 +1672,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, perm_strings, require_any=True)
+                        await _authorize_api_key(db, api_key, perm_strings, require_any=True)
                         return None
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1761,8 +1809,7 @@ def require_ownership_permission(
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, [own_perm])
-                    owner = await _user_from_api_key(db, api_key)
+                    owner = await _authorize_api_key(db, api_key, [own_perm])
                     if owner is None:
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -1777,8 +1824,7 @@ def require_ownership_permission(
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, [own_perm])
-                        owner = await _user_from_api_key(db, api_key)
+                        owner = await _authorize_api_key(db, api_key, [own_perm])
                         if owner is None:
                             raise HTTPException(
                                 status_code=status.HTTP_403_FORBIDDEN,
