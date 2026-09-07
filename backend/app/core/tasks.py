@@ -83,3 +83,31 @@ def _on_task_done(task: asyncio.Task[Any]) -> None:
 def active_task_count() -> int:
     """Number of background tasks currently in flight. Used by tests."""
     return len(_background_tasks)
+
+
+async def cancel_background_tasks(*, timeout: float = 1.0) -> None:
+    """Cancel and await fire-and-forget tasks before loop teardown.
+
+    Background tasks may own database sessions whose aiosqlite worker threads
+    must finish while the event loop is still alive. Call this before closing
+    the loop or disposing the database engine.
+    """
+    tasks = tuple(_background_tasks)
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        pending = [task.get_name() for task in tasks if not task.done()]
+        logger.warning(
+            "Timed out waiting %.1fs for background tasks to stop: %s",
+            timeout,
+            ", ".join(pending) if pending else "unknown",
+        )
+    finally:
+        _background_tasks.difference_update(tasks)

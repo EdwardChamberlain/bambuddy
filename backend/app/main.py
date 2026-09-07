@@ -73,7 +73,7 @@ from backend.app.api.routes.maintenance import _get_printer_maintenance_internal
 from backend.app.api.routes.support import init_debug_logging
 from backend.app.core.config import APP_VERSION, settings as app_settings
 from backend.app.core.database import async_session, engine, init_db
-from backend.app.core.tasks import spawn_background_task
+from backend.app.core.tasks import cancel_background_tasks, spawn_background_task
 from backend.app.core.websocket import ws_manager
 from backend.app.models.smart_plug import SmartPlug
 from backend.app.services.archive import ArchiveService, peek_plate_index_in_3mf, swap_plate_suffix
@@ -6457,6 +6457,10 @@ async def lifespan(app: FastAPI):
     set_shared_http_client(None)
     set_shared_makerworld_http_client(None)
     await _shared_cloud_http_client.aclose()
+
+    # Fire-and-forget tasks may still own aiosqlite worker threads. Cancel and
+    # await them while the event loop is alive, before disposing the engine.
+    await cancel_background_tasks()
 
     # Checkpoint WAL (SQLite only) and close all database connections
     from backend.app.core.db_dialect import is_sqlite

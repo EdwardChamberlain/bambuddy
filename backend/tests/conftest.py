@@ -40,6 +40,7 @@ def _cleanup_test_plate_cal_dir():
 atexit.register(_cleanup_test_plate_cal_dir)
 
 from backend.app.core.database import Base  # noqa: E402
+from backend.app.core.tasks import cancel_background_tasks  # noqa: E402
 
 # Most tests are fastest on an isolated in-memory database. Integration test
 # modules that run concurrent background sessions can override the
@@ -217,6 +218,10 @@ async def async_client(test_engine, db_session) -> AsyncGenerator[AsyncClient, N
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             yield client
+
+        # Background tasks may own aiosqlite worker threads. Finish their
+        # cancellation before disposing the engine or closing this test loop.
+        await cancel_background_tasks()
 
         # The app lifespan called init_db() which used the module-level engine
         # (not the test engine), creating aiosqlite connections. Dispose those

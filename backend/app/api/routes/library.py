@@ -21,13 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.api.routes.cloud import resolve_api_key_cloud_owner
+from backend.app.core import database
 from backend.app.core.auth import (
     RequireCameraStreamTokenIfAuthEnabled,
     require_ownership_permission,
     require_permission_if_auth_enabled,
 )
 from backend.app.core.config import settings as app_settings
-from backend.app.core.database import async_session, get_db
+from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.core.tasks import spawn_background_task
 from backend.app.models.archive import PrintArchive
@@ -681,7 +682,7 @@ async def _backfill_external_stl_thumbnails(folder_ids: list[int]) -> None:
     if not folder_ids:
         return
     thumbnails_dir = get_library_thumbnails_dir()
-    async with async_session() as db:
+    async with database.async_session() as db:
         result = await db.execute(
             LibraryFile.active().where(
                 LibraryFile.folder_id.in_(folder_ids),

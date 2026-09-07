@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from backend.app.core.tasks import active_task_count, spawn_background_task
+from backend.app.core.tasks import active_task_count, cancel_background_tasks, spawn_background_task
 
 
 @pytest.mark.asyncio
@@ -102,3 +102,19 @@ async def test_task_name_propagates():
     task = spawn_background_task(asyncio.sleep(0), name="named-spawn-test")
     assert task.get_name() == "named-spawn-test"
     await task
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_waits_for_shutdown():
+    """Shutdown cleanup must cancel tracked tasks and clear the registry."""
+
+    async def long_running() -> None:
+        await asyncio.sleep(10.0)
+
+    task = spawn_background_task(long_running(), name="shutdown-cleanup-test")
+    await asyncio.sleep(0)
+
+    await cancel_background_tasks()
+
+    assert task.cancelled()
+    assert active_task_count() == 0
