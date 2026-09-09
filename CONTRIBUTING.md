@@ -101,6 +101,25 @@ The docs repo can be edited directly in the browser, no `git clone` required:
 - Node.js 20+
 - npm
 
+### Quick setup
+
+From the repository root, run the QuickStart script to create or reuse the
+Python virtual environment, install backend and frontend dependencies, and
+install the pre-commit hook:
+
+```bash
+./quickstart.sh
+```
+
+The script is safe to run again when dependencies need to be refreshed. It
+leaves the environment ready for the development and test commands below; it
+cannot activate the virtual environment in the calling shell, so activate it
+afterward with:
+
+```bash
+source venv/bin/activate
+```
+
 ### Backend Setup
 
 ```bash
