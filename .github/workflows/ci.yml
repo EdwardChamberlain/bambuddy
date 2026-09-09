@@ -203,7 +203,11 @@ jobs:
           # Playwright installs its own Chromium. A stale Google Chrome APT
           # index on the hosted runner can otherwise fail this setup step
           # before the browser tests get a chance to run.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          for source in /etc/apt/sources.list.d/*; do
+            if [ -f "$source" ] && grep -q 'dl.google.com/linux/chrome-stable/deb' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
           npx playwright install --with-deps chromium
 
       - name: Run browser tests
