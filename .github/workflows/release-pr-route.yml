@@ -1,0 +1,39 @@
+name: Release PR Route
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  release-pr-route:
+    name: Release PR Route
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce dev-to-main release route
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$BASE_BRANCH" != "main" ]]; then
+            echo "::error::Release PRs must target main; got '$BASE_BRANCH'."
+            exit 1
+          fi
+
+          if [[ "$HEAD_BRANCH" != "dev" ]]; then
+            echo "::error::Release PRs must come from the dev branch; got '$HEAD_BRANCH'."
+            exit 1
+          fi
+
+          if [[ "$HEAD_REPOSITORY" != "$REPOSITORY" ]]; then
+            echo "::error::Release PRs must come from the repository's own dev branch; got '$HEAD_REPOSITORY'."
+            exit 1
+          fi
+
+          echo "Release route accepted: $HEAD_REPOSITORY:$HEAD_BRANCH -> $REPOSITORY:$BASE_BRANCH"
