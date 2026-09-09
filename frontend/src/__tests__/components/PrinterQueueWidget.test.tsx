@@ -117,6 +117,29 @@ describe('PrinterQueueWidget', () => {
     });
   });
 
+  describe('long item names', () => {
+    it.each([
+      'PrintmepleasethisisareallylongprinjobnameandshouldbetruncatedsoIhopeitworksok',
+      'print me please this is a very long job name that should be truncates so I hope it is',
+    ])('keeps the queue row constrained for %s', async (archiveName) => {
+      server.use(
+        http.get('/api/v1/queue/', () => {
+          return HttpResponse.json([{ ...mockQueueItems[0], archive_name: archiveName }]);
+        })
+      );
+
+      render(<PrinterQueueWidget printerId={1} />);
+
+      await waitFor(() => {
+        expect(screen.getByText(archiveName)).toBeInTheDocument();
+      });
+
+      expect(screen.getByText(archiveName)).toHaveClass('truncate');
+      expect(screen.getByRole('link')).toHaveClass('min-w-0', 'max-w-full', 'overflow-hidden');
+      expect(screen.getByRole('link').firstElementChild).toHaveClass('min-w-0', 'overflow-hidden');
+    });
+  });
+
   describe('link behavior', () => {
     it('links to queue page', async () => {
       render(<PrinterQueueWidget printerId={1} />);

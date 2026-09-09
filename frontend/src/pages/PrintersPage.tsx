@@ -2717,7 +2717,7 @@ function SinglePrinterCockpit({
         </div>
 
         <div className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
-          <section data-testid="cockpit-actions-panel" className="rounded-xl border border-white/10 bg-bambu-dark/80 p-3">
+          <section data-testid="cockpit-actions-panel" className="min-w-0 overflow-hidden rounded-xl border border-white/10 bg-bambu-dark/80 p-3">
             {primaryActionPanel}
             <PrinterQueueWidget
               printerId={printer.id}
@@ -4102,7 +4102,7 @@ function PrinterCard({
   return (
     <Card
       id={`printer-card-${printer.id}`}
-      className={`relative flex h-full flex-col ${isSelected ? 'ring-2 ring-bambu-green' : ''}`}
+      className={`relative flex h-full min-w-0 flex-col ${isSelected ? 'ring-2 ring-bambu-green' : ''}`}
       onDragEnter={handleCardDragEnter}
       onDragOver={handleCardDragOver}
       onDragLeave={handleCardDragLeave}
@@ -4152,7 +4152,7 @@ function PrinterCard({
           </div>
         </div>
       )}
-      <CardContent className="flex flex-1 flex-col">
+      <CardContent className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
         <div className="mb-4 rounded-lg bg-bambu-dark p-3">
           {/* Top row: Image, Name, Menu */}
