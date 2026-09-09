@@ -2,11 +2,13 @@
 
 import base64
 import string
+from datetime import datetime, timezone
 
+import pyotp
 import pytest
 from passlib.context import CryptContext
 
-from backend.app.api.routes.mfa import _generate_backup_codes, _generate_totp_qr_b64
+from backend.app.api.routes.mfa import _generate_backup_codes, _generate_totp_qr_b64, _totp_counter_for_code
 
 
 class TestBackupCodeGeneration:
@@ -47,3 +49,16 @@ class TestTOTPQRCode:
         result = _generate_totp_qr_b64(uri)
         decoded = base64.b64decode(result)
         assert decoded[:4] == b"\x89PNG"
+
+
+class TestTOTPReplayCounter:
+    """Tests for mapping a verified code to its actual time-step counter."""
+
+    def test_previous_window_code_uses_previous_counter(self):
+        now = datetime(2026, 1, 1, 12, 0, 15, tzinfo=timezone.utc)
+        totp = pyotp.TOTP("JBSWY3DPEHPK3PXP")
+
+        current_counter = totp.timecode(now)
+        previous_code = totp.at(now, counter_offset=-1)
+
+        assert _totp_counter_for_code(totp, previous_code, now) == current_counter - 1
