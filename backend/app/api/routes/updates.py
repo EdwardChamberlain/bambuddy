@@ -232,10 +232,15 @@ def parse_version(version: str) -> tuple:
         "0.1.5"    -> (0, 1, 5, 0, 0, 0)   # release
         "0.1.5b7"  -> (0, 1, 5, 0, 1, 7)   # beta 7
         "0.1.5b10" -> (0, 1, 5, 0, 1, 10)  # beta 10
+        "0.1.5-#abc1234" -> (0, 1, 5, 0, 1, 0)  # dev build
         "0.1.8.1"  -> (0, 1, 8, 1, 0, 0)   # patch release
     """
     # Remove 'v' prefix if present
     version = version.lstrip("v")
+
+    # Dev Docker images append the short source revision to VERSION. Treat all
+    # such builds as pre-releases, including hashes containing only digits.
+    is_dev_build = bool(re.search(r"-#[0-9a-f]+$", version, re.IGNORECASE))
 
     # Strip daily build suffix (e.g., "0.2.2b4-daily.20260313" -> "0.2.2b4")
     version = re.sub(r"-daily\.\d+$", "", version)
@@ -250,8 +255,8 @@ def parse_version(version: str) -> tuple:
         micro = int(match.group(4)) if match.group(4) else 0
         prerelease_num = int(match.group(5)) if match.group(5) else 0
 
-        # Check if this is a prerelease (has b/beta/alpha/rc/daily suffix anywhere)
-        is_prerelease = 1 if re.search(r"[a-zA-Z]", version) else 0
+        # Check if this is a prerelease (beta/alpha/rc/daily or dev build).
+        is_prerelease = 1 if is_dev_build or re.search(r"[a-zA-Z]", version) else 0
 
         return (major, minor, patch, micro, is_prerelease, prerelease_num)
 

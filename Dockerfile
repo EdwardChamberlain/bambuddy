@@ -59,6 +59,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Copy version metadata and backend
 COPY VERSION ./VERSION
+
+# Development images pass the checked-out commit so the version shown in the
+# UI identifies the exact source revision. Release builds omit BUILD_COMMIT and
+# therefore retain the canonical VERSION value unchanged.
+ARG BUILD_COMMIT=""
+RUN if [ -n "$BUILD_COMMIT" ]; then \
+        version="$(tr -d '[:space:]' < VERSION)"; \
+        printf '%s-#%s\n' "$version" "$BUILD_COMMIT" > VERSION; \
+    fi
+
 COPY backend/ ./backend/
 
 # Operational recovery tooling is deliberately shipped in the image so it can
