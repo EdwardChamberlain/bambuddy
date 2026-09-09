@@ -66,7 +66,7 @@ class _CameraResolver(AbstractResolver):
 
     async def resolve(self, host: str, port: int = 0, family: int = socket.AF_UNSPEC) -> list[dict]:
         try:
-            addresses = resolve_safe_lan_addresses(host, port, label="External camera URL")
+            addresses = _resolve_camera_addresses(host, port)
         except (OSError, ValueError) as exc:
             raise OSError(str(exc)) from exc
 
@@ -92,6 +92,16 @@ class _CameraResolver(AbstractResolver):
 
     async def close(self) -> None:
         return None
+
+
+def _resolve_camera_addresses(hostname: str, port: int) -> tuple[str, ...]:
+    """Resolve a camera hostname while retaining the camera URL policy."""
+    addresses = resolve_safe_lan_addresses(hostname, port, label="External camera URL")
+    for address in addresses:
+        ip_address = ipaddress.ip_address(address)
+        if ip_address.is_loopback or ip_address.is_link_local:
+            raise ValueError("External camera URL must not resolve to loopback or link-local address")
+    return addresses
 
 
 def _camera_http_connector() -> aiohttp.TCPConnector:
@@ -195,11 +205,7 @@ async def _prepare_rtsp_url(url: str) -> tuple[str, asyncio.Server | None] | Non
     target_port = parsed.port or (322 if scheme == "rtsps" else 554)
 
     try:
-        target_address = resolve_safe_lan_addresses(
-            hostname,
-            target_port,
-            label="External camera URL",
-        )[0]
+        target_address = _resolve_camera_addresses(hostname, target_port)[0]
     except (OSError, ValueError) as exc:
         logger.warning(
             "Blocked external camera RTSP destination: %s",
@@ -466,7 +472,7 @@ async def _capture_mjpeg_frame(url: str, timeout: int) -> bytes | None:
                 connector=_camera_http_connector(),
                 trust_env=False,
             ) as session,
-            session.get(safe_url) as response,
+            session.get(safe_url, allow_redirects=False) as response,
         ):
             if response.status != 200:
                 logger.error("MJPEG stream returned status %s", response.status)
@@ -606,7 +612,7 @@ async def _capture_snapshot(url: str, timeout: int) -> bytes | None:
                 connector=_camera_http_connector(),
                 trust_env=False,
             ) as session,
-            session.get(safe_url) as response,
+            session.get(safe_url, allow_redirects=False) as response,
         ):
             if response.status != 200:
                 logger.error("Snapshot URL returned status %s", response.status)
@@ -770,7 +776,7 @@ async def _stream_mjpeg(url: str) -> AsyncGenerator[bytes, None]:
                 connector=_camera_http_connector(),
                 trust_env=False,
             ) as session,
-            session.get(safe_url) as response,
+            session.get(safe_url, allow_redirects=False) as response,
         ):
             if response.status != 200:
                 logger.error("MJPEG stream returned status %s", response.status)

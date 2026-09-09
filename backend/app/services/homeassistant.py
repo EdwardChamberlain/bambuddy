@@ -299,7 +299,11 @@ class HomeAssistantService:
         allowed_domains = {"switch", "light", "input_boolean", "script"}
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.get(
                     f"{url.rstrip('/')}/api/states",
                     headers={"Authorization": f"Bearer {token}"},
@@ -342,7 +346,11 @@ class HomeAssistantService:
         Returns list of sensor entities with power/energy units.
         """
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.get(
                     f"{url.rstrip('/')}/api/states",
                     headers={"Authorization": f"Bearer {token}"},

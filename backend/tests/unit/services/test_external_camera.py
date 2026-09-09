@@ -52,6 +52,20 @@ class TestCameraUrlSecurity:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("unsafe_address", ["127.0.0.1", "169.254.1.1"])
+    async def test_http_resolver_rejects_camera_specific_unsafe_address(self, monkeypatch, unsafe_address):
+        from backend.app.services import external_camera
+
+        monkeypatch.setattr(
+            external_camera,
+            "resolve_safe_lan_addresses",
+            lambda host, port, *, label: (unsafe_address,),
+        )
+
+        with pytest.raises(OSError, match="loopback or link-local"):
+            await external_camera._CameraResolver().resolve("camera.example", 8080, socket.AF_UNSPEC)
+
+    @pytest.mark.asyncio
     async def test_rtsp_preparation_replaces_hostname_with_checked_address(self, monkeypatch):
         from backend.app.services import external_camera
 
@@ -76,6 +90,19 @@ class TestCameraUrlSecurity:
             raise ValueError("cloud metadata")
 
         monkeypatch.setattr(external_camera, "resolve_safe_lan_addresses", reject_destination)
+
+        assert await external_camera._prepare_rtsp_url("rtsp://camera.example/stream") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("unsafe_address", ["127.0.0.1", "169.254.1.1"])
+    async def test_rtsp_preparation_rejects_camera_specific_unsafe_address(self, monkeypatch, unsafe_address):
+        from backend.app.services import external_camera
+
+        monkeypatch.setattr(
+            external_camera,
+            "resolve_safe_lan_addresses",
+            lambda host, port, *, label: (unsafe_address,),
+        )
 
         assert await external_camera._prepare_rtsp_url("rtsp://camera.example/stream") is None
 
@@ -142,8 +169,10 @@ class _FakeMjpegSession:
 
     def __init__(self, response):
         self._response = response
+        self.get_kwargs = []
 
-    def get(self, _url):
+    def get(self, _url, **kwargs):
+        self.get_kwargs.append(kwargs)
         return self._response
 
     async def __aenter__(self):
@@ -153,12 +182,15 @@ class _FakeMjpegSession:
         return None
 
 
-def _patch_mjpeg_session(response):
+def _patch_mjpeg_session(response, instances=None):
     """Patch `aiohttp.ClientSession` inside the external_camera module so the
     real `_capture_mjpeg_frame` runs against our fake stream."""
 
     def _factory(*_args, **_kwargs):
-        return _FakeMjpegSession(response)
+        session = _FakeMjpegSession(response)
+        if instances is not None:
+            instances.append(session)
+        return session
 
     return patch("backend.app.services.external_camera.aiohttp.ClientSession", _factory)
 
@@ -284,6 +316,19 @@ class TestCaptureMjpegFrameWarmupSkip:
             frame = await _capture_mjpeg_frame("http://camera.example/stream", timeout=15)
 
         assert frame is None
+
+    @pytest.mark.asyncio
+    async def test_http_camera_does_not_follow_redirects(self):
+        """A safe camera URL must not redirect to an unchecked destination."""
+        from backend.app.services.external_camera import _capture_mjpeg_frame
+
+        sessions = []
+        response = _FakeMjpegResponse(chunks=[])
+
+        with _patch_mjpeg_session(response, sessions):
+            await _capture_mjpeg_frame("http://camera.example/stream", timeout=15)
+
+        assert sessions[0].get_kwargs == [{"allow_redirects": False}]
 
 
 class TestFormatMjpegFrame:
