@@ -420,6 +420,23 @@ async def record_email_otp_send(db: AsyncSession, username: str) -> None:
 # ---------------------------------------------------------------------------
 # TOTP replay-protection helper
 # ---------------------------------------------------------------------------
+def _totp_counter_for_code(totp_obj: pyotp.TOTP, code: str, now: datetime) -> int:
+    """Return the time-step counter represented by a verified TOTP code.
+
+    ``pyotp.TOTP.at`` accepts a time (or a time plus ``counter_offset``), not
+    a counter value.  Passing a counter to it makes pyotp interpret that
+    counter as Unix time, which loses the distinction between the current and
+    previous verification windows at a boundary.
+    """
+    current_counter = totp_obj.timecode(now)
+    for counter_offset in (0, -1, 1):
+        if totp_obj.at(now, counter_offset=counter_offset) == code:
+            return current_counter + counter_offset
+    # Callers invoke this after ``verify(..., valid_window=1)``.  Keep a safe
+    # fallback for unexpected callers rather than storing an arbitrary value.
+    return current_counter
+
+
 def _assert_totp_not_replayed(totp_obj: pyotp.TOTP, totp_record: UserTOTP, code: str) -> None:
     """Raise HTTP 400 if this TOTP code was already accepted in its time window.
 
@@ -428,18 +445,7 @@ def _assert_totp_not_replayed(totp_obj: pyotp.TOTP, totp_record: UserTOTP, code:
     previous 30-second step.  Using timecode(now) would store the wrong counter
     when the previous-window code is accepted, allowing immediate replay.
     """
-    # Determine which time-step the accepted code belongs to.
-    now = datetime.now(timezone.utc)
-    accepted_counter: int | None = None
-    for offset in (0, -1):  # current window first, then previous
-        candidate_time = now.timestamp() + offset * totp_obj.interval
-        candidate_counter = totp_obj.timecode(datetime.fromtimestamp(candidate_time, tz=timezone.utc))
-        if totp_obj.at(candidate_counter) == code:
-            accepted_counter = candidate_counter
-            break
-    if accepted_counter is None:
-        accepted_counter = totp_obj.timecode(now)  # fallback (should not happen after verify())
-
+    accepted_counter = _totp_counter_for_code(totp_obj, code, datetime.now(timezone.utc))
     totp_record.accept_counter(accepted_counter)
 
 
@@ -707,6 +713,9 @@ async def setup_totp(
         existing.secret = secret
         existing.is_enabled = False
         existing.backup_code_hashes = []
+        # The replay counter belongs to the old secret and must not block the
+        # first code generated for the newly provisioned authenticator.
+        existing.last_totp_counter = None
     else:
         db.add(UserTOTP(user_id=current_user.id, secret=secret, is_enabled=False))
 
