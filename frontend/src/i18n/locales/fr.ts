@@ -6,6 +6,11 @@ export default {
     status: "Préchauffage",
     hint: "30–60°C, 1–120 minutes. Le minuteur démarre lorsque la commande de chauffage est envoyée.",
     bedOnly: "!! Chauffage de chambre indisponible sur cette machine. Seul le plateau sera utilisé pour chauffer.",
+    remaining: 'Restant : {{time}}',
+    waitingForConfirmation: 'En attente de la confirmation du chauffage',
+    skip: 'Ignorer le préchauffage de la chambre',
+    skipped: 'Préchauffage de la chambre ignoré',
+    skipFailed: 'Impossible d’ignorer le préchauffage de la chambre',
   },
   // Navigation
   nav: {

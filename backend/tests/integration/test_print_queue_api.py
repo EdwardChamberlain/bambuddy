@@ -2,6 +2,7 @@
 
 import json
 import zipfile
+from datetime import datetime, timezone
 
 import pytest
 from httpx import AsyncClient
@@ -736,6 +737,29 @@ class TestPrintQueueAPI:
         assert response.status_code == 200
         data = response.json()
         assert (data["chamber_heat_soak"], data["heat_soak_temperature"], data["heat_soak_minutes"]) == (True, 55, 20)
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_skip_heat_soak_returns_item_to_dispatchable_state(
+        self, async_client, queue_item_factory, db_session
+    ):
+        item = await queue_item_factory(
+            status="preheating",
+            chamber_heat_soak=True,
+            preheat_owner="test-worker",
+            preheat_started_at=datetime.now(timezone.utc),
+        )
+
+        response = await async_client.post(f"/api/v1/queue/{item.id}/skip-heat-soak")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["message"] == "Heat soak skipped"
+        await db_session.refresh(item)
+        assert item.status == "pending"
+        assert item.chamber_heat_soak is False
+        assert item.manual_start is False
+        assert item.preheat_owner is None
+        assert item.preheat_started_at is None
 
     @pytest.mark.parametrize("action", ["cancel", "stop", "edit", "delete"])
     async def test_preheating_api_interruptions_release_reservation(

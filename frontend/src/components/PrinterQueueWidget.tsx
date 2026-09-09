@@ -38,20 +38,23 @@ export function PrinterQueueWidget({ printerId, printerModel, loadedFilamentType
   // the plate-clear gate was up with auto-dispatch items queued — both POSTed
   // to the same /clear-plate endpoint, so the widget button was pure noise.
   const linkClassName = variant === 'panelExtension'
-    ? 'block mt-2 border-t border-bambu-dark-tertiary pt-2 pl-1 hover:opacity-90 transition-opacity'
-    : 'block mb-3 p-3 bg-bambu-dark rounded-lg hover:bg-bambu-dark-tertiary transition-colors';
+    ? 'block min-w-0 w-full mt-2 border-t border-bambu-dark-tertiary pt-2 pl-1 hover:opacity-90 transition-opacity'
+    : 'block min-w-0 w-full mb-3 p-3 bg-bambu-dark rounded-lg hover:bg-bambu-dark-tertiary transition-colors';
 
   return (
     <Link
       to="/queue"
       className={linkClassName}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex min-w-0 max-w-full items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <Calendar className="w-5 h-5 text-yellow-400 flex-shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="text-xs text-bambu-gray">{t('queue.nextInQueue')}</p>
-            <p className="text-sm text-white truncate">
+            <p
+              className="min-w-0 max-w-full truncate text-sm text-white"
+              title={nextItem?.archive_name || nextItem?.library_file_name || undefined}
+            >
               {nextItem?.archive_name || nextItem?.library_file_name || `File #${nextItem?.archive_id || nextItem?.library_file_id}`}
             </p>
           </div>

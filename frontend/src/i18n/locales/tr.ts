@@ -6,6 +6,11 @@ export default {
     status: "Ön ısıtılıyor",
     hint: "30–60°C, 1–120 dakika. Zamanlayıcı, ısıtma komutu gönderildiğinde başlar.",
     bedOnly: "!! Bu makinede hazne ısıtıcısı yok. Isıtma yalnızca tabla ile yapılacaktır.",
+    remaining: 'Kalan: {{time}}',
+    waitingForConfirmation: 'Isıtıcı onayı bekleniyor',
+    skip: 'Hazne ön ısıtmasını atla',
+    skipped: 'Hazne ön ısıtması atlandı',
+    skipFailed: 'Hazne ön ısıtması atlanamadı',
   },
   // Navigasyon
   nav: {

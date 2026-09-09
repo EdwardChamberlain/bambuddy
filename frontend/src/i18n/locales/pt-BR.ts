@@ -6,6 +6,11 @@ export default {
     status: "Pré-aquecendo",
     hint: "30–60°C, 1–120 minutos. O temporizador começa quando o comando de aquecimento é enviado.",
     bedOnly: "!! Aquecedor de câmara indisponível nesta máquina. O aquecimento será feito somente pela mesa.",
+    remaining: 'Restante: {{time}}',
+    waitingForConfirmation: 'Aguardando confirmação do aquecedor',
+    skip: 'Pular o aquecimento da câmara',
+    skipped: 'Aquecimento da câmara ignorado',
+    skipFailed: 'Não foi possível ignorar o aquecimento da câmara',
   },
   // Navigation
   nav: {
