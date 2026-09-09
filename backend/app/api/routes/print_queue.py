@@ -34,7 +34,7 @@ from backend.app.schemas.print_queue import (
     PrintQueueItemUpdate,
     PrintQueueReorder,
 )
-from backend.app.services.chamber_heat_soak import abort_heat_soak, lock_queue_item
+from backend.app.services.chamber_heat_soak import abort_heat_soak, lock_queue_item, skip_heat_soak
 from backend.app.services.filament_deficit import compute_deficit_for_queue_item
 from backend.app.services.filament_requirements import (
     build_queue_filament_overrides,
@@ -1436,6 +1436,36 @@ async def stop_queue_item(
         spawn_background_task(cooldown_and_poweroff(), name=f"queue-cooldown-poweroff-{printer_id}")
 
     return {"message": "Print stopped" if stop_sent else "Queue item cancelled (printer was offline)"}
+
+
+@router.post("/{item_id}/skip-heat-soak")
+async def skip_queue_item_heat_soak(
+    item_id: int,
+    db: AsyncSession = Depends(get_db),
+    auth_result: tuple[User | None, bool] = Depends(
+        require_ownership_permission(
+            Permission.QUEUE_UPDATE_ALL,
+            Permission.QUEUE_UPDATE_OWN,
+        )
+    ),
+):
+    """Skip the active heat-soak stage and return the item to dispatchable state."""
+    user, can_modify_all = auth_result
+
+    item = await lock_queue_item(db, item_id)
+    if not item:
+        raise HTTPException(404, "Queue item not found")
+
+    if not can_modify_all and user is not None:
+        if item.created_by_id is None or item.created_by_id != user.id:
+            raise HTTPException(403, "You can only update your own queue items")
+
+    if item.status != "preheating":
+        raise HTTPException(400, f"Can only skip heat soak for preheating items, current status: '{item.status}'")
+
+    await skip_heat_soak(db, item)
+    logger.info("Skipped heat soak for queue item %s", item_id)
+    return {"message": "Heat soak skipped"}
 
 
 @router.post("/{item_id}/start")

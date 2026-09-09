@@ -6,6 +6,11 @@ export default {
     status: "予熱中",
     hint: "30～60°C、1～120分。加熱コマンドを送信するとタイマーが開始します。",
     bedOnly: "!! この機種にはチャンバーヒーターがありません。ベッドのみで加熱します。",
+    remaining: '残り: {{time}}',
+    waitingForConfirmation: 'ヒーターの確認を待っています',
+    skip: 'チャンバー予熱をスキップ',
+    skipped: 'チャンバー予熱をスキップしました',
+    skipFailed: 'チャンバー予熱をスキップできませんでした',
   },
   // Navigation
   nav: {

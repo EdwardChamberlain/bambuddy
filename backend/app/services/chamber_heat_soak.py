@@ -101,6 +101,26 @@ async def abort_heat_soak(db: AsyncSession, item: PrintQueueItem, reason: str, *
     await db.commit()
 
 
+async def skip_heat_soak(db: AsyncSession, item: PrintQueueItem) -> None:
+    """Release an active soak and let the queue dispatch the item normally.
+
+    Skipping is different from stopping: keep the printer's current heater
+    targets so the print can start immediately, but remove the preheating
+    reservation and disable the soak for this queue item.
+    """
+    _show_preheating(item.printer_id, False)
+    item.status = "pending"
+    item.chamber_heat_soak = False
+    item.manual_start = False
+    item.error_message = None
+    item.completed_at = None
+    item.preheat_owner = None
+    item.preheat_requested_at = None
+    item.preheat_checked_at = None
+    item.preheat_started_at = None
+    await db.commit()
+
+
 class ChamberHeatSoak:
     def __init__(self):
         self.owner = str(uuid4())

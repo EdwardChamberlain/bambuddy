@@ -4796,6 +4796,8 @@ export const api = {
     request<{ message: string }>(`/queue/${id}/cancel`, { method: 'POST' }),
   stopQueueItem: (id: number) =>
     request<{ message: string }>(`/queue/${id}/stop`, { method: 'POST' }),
+  skipQueueHeatSoak: (id: number) =>
+    request<{ message: string }>(`/queue/${id}/skip-heat-soak`, { method: 'POST' }),
   /**
    * Start a staged queue item. The backend re-checks live filament deficit
    * for the assigned spool and, when short, returns 409 with a structured

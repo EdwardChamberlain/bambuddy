@@ -6,6 +6,11 @@ export default {
     status: "Preheating",
     hint: "30–60°C, 1–120 minutes. The timer starts when the heating command is sent.",
     bedOnly: "!! Chamber Heater not available on this machine. Heating will be completed using only the bed",
+    remaining: 'Remaining: {{time}}',
+    waitingForConfirmation: 'Waiting for heater confirmation',
+    skip: 'Skip heat soak',
+    skipped: 'Heat soak skipped',
+    skipFailed: 'Failed to skip heat soak',
   },
   // Navigation
   nav: {

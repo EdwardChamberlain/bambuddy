@@ -6,6 +6,11 @@ export default {
     status: "Precalentando",
     hint: "30–60°C, 1–120 minutos. El temporizador comienza cuando se envía el comando de calentamiento.",
     bedOnly: "!! Esta máquina no tiene calefactor de cámara. Solo se utilizará la cama para calentar.",
+    remaining: 'Restante: {{time}}',
+    waitingForConfirmation: 'Esperando la confirmación del calentador',
+    skip: 'Omitir el calentamiento de la cámara',
+    skipped: 'Calentamiento de cámara omitido',
+    skipFailed: 'No se pudo omitir el calentamiento de la cámara',
   },
   // Navigation
   nav: {

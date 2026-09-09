@@ -6,6 +6,11 @@ export default {
     status: "예열 중",
     hint: "30–60°C, 1–120분. 가열 명령을 보내면 타이머가 시작됩니다.",
     bedOnly: "!! 이 장비에는 챔버 히터가 없습니다. 베드만 사용하여 가열합니다.",
+    remaining: '남은 시간: {{time}}',
+    waitingForConfirmation: '히터 확인을 기다리는 중',
+    skip: '챔버 예열 건너뛰기',
+    skipped: '챔버 예열을 건너뛰었습니다',
+    skipFailed: '챔버 예열을 건너뛰지 못했습니다',
   },
   nav: {
     printers: '프린터',

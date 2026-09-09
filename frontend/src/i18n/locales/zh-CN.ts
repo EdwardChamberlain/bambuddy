@@ -6,6 +6,11 @@ export default {
     status: "预热中",
     hint: "30–60°C，1–120分钟。发送加热指令后开始计时。",
     bedOnly: "!! 此机型没有腔体加热器。将仅使用热床加热。",
+    remaining: '剩余：{{time}}',
+    waitingForConfirmation: '等待加热器确认',
+    skip: '跳过腔体预热',
+    skipped: '已跳过腔体预热',
+    skipFailed: '无法跳过腔体预热',
   },
   // Navigation
   nav: {

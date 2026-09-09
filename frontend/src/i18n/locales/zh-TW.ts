@@ -6,6 +6,11 @@ export default {
     status: "預熱中",
     hint: "30–60°C，1–120分鐘。送出加熱指令後開始計時。",
     bedOnly: "!! 此機型沒有腔體加熱器。將僅使用熱床加熱。",
+    remaining: '剩餘：{{time}}',
+    waitingForConfirmation: '等待加熱器確認',
+    skip: '略過腔體預熱',
+    skipped: '已略過腔體預熱',
+    skipFailed: '無法略過腔體預熱',
   },
   // Navigation
   nav: {
