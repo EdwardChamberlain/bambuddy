@@ -193,7 +193,12 @@ def rewrite_rtsp_request_url(data: bytes, proxy_url: bytes, real_url: bytes) -> 
     return b"\r\n".join(lines)
 
 
-async def create_tls_proxy(target_host: str, target_port: int) -> tuple[int, "asyncio.Server"]:
+async def create_tls_proxy(
+    target_host: str,
+    target_port: int,
+    *,
+    connect_host: str | None = None,
+) -> tuple[int, "asyncio.Server"]:
     """Create a local TCP→TLS proxy for RTSP streams.
 
     Bambu printers use RTSPS (RTSP over TLS) with self-signed certificates.
@@ -210,11 +215,17 @@ async def create_tls_proxy(target_host: str, target_port: int) -> tuple[int, "as
     rewrites ``127.0.0.1:<proxy_port>`` → ``<target_host>:<target_port>`` in
     client→server data so the printer recognises the stream path.
 
+    ``connect_host`` optionally pins the socket destination while retaining
+    ``target_host`` in the RTSP request and as the TLS server name. This is
+    used for user-configured camera hostnames so DNS is resolved and checked
+    before the proxy starts connecting.
+
     Returns ``(local_port, server)``.  Caller must close the server when done.
     """
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
+    connection_host = connect_host or target_host
 
     # Filled in after the server socket is created (handler only runs after).
     _local_port: list[int] = [0]
@@ -223,7 +234,12 @@ async def create_tls_proxy(target_host: str, target_port: int) -> tuple[int, "as
         tls_writer = None
         try:
             tls_reader, tls_writer = await asyncio.wait_for(
-                asyncio.open_connection(target_host, target_port, ssl=ssl_ctx),
+                asyncio.open_connection(
+                    connection_host,
+                    target_port,
+                    ssl=ssl_ctx,
+                    server_hostname=target_host,
+                ),
                 timeout=10.0,
             )
 
@@ -294,7 +310,13 @@ async def create_tls_proxy(target_host: str, target_port: int) -> tuple[int, "as
 
     server = await asyncio.start_server(_handle, "127.0.0.1", 0)
     _local_port[0] = server.sockets[0].getsockname()[1]
-    logger.debug("TLS proxy for %s:%s listening on 127.0.0.1:%s", target_host, target_port, _local_port[0])
+    logger.debug(
+        "TLS proxy for %s:%s (connected via %s) listening on 127.0.0.1:%s",
+        target_host,
+        target_port,
+        connection_host,
+        _local_port[0],
+    )
     return _local_port[0], server
 
 

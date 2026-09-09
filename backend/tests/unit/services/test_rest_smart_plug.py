@@ -1,6 +1,7 @@
 """Unit tests for REST smart plug service."""
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -95,6 +96,38 @@ class TestParseHeaders:
 
     def test_invalid_json(self, service):
         assert service._parse_headers("not json") == {}
+
+    def test_invalid_json_does_not_log_header_values(self, service, caplog):
+        caplog.set_level(logging.WARNING)
+        secret = "super-secret-bearer-token"
+
+        assert service._parse_headers(f'{{"Authorization": "Bearer {secret}"') == {}
+
+        assert secret not in caplog.text
+
+
+class TestCredentialRedaction:
+    @pytest.mark.asyncio
+    async def test_invalid_url_log_redacts_userinfo(self, service, caplog):
+        caplog.set_level(logging.WARNING)
+        secret = "url-secret"
+
+        await service._send_request(f"http://user:{secret}@169.254.169.254/latest/meta-data/")
+
+        assert secret not in caplog.text
+        assert "[REDACTED]" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_success_log_redacts_userinfo(self, service, mock_plug, caplog):
+        caplog.set_level(logging.INFO)
+        secret = "url-secret"
+        mock_plug.rest_on_url = f"http://user:{secret}@192.168.1.50:8080/api/on"
+
+        with patch.object(service, "_send_request", new_callable=AsyncMock, return_value=MagicMock()):
+            assert await service.turn_on(mock_plug) is True
+
+        assert secret not in caplog.text
+        assert "[REDACTED]" in caplog.text
 
 
 class TestExtractJsonPath:

@@ -728,6 +728,13 @@ GUARDED_BODY_URLS = {
     ("SmartPlugUpdate", "rest_status_url"),
     ("SmartPlugUpdate", "rest_power_url"),
     ("SmartPlugUpdate", "rest_energy_url"),
+    # External camera handlers use the scheme-aware LAN policy. HTTP camera
+    # requests use the pinned aiohttp resolver; RTSP/RTSPS requests use a
+    # validated numeric target (or the pinned TLS proxy).
+    ("PrinterCreate", "external_camera_url"),
+    ("PrinterCreate", "external_camera_snapshot_url"),
+    ("PrinterUpdate", "external_camera_url"),
+    ("PrinterUpdate", "external_camera_snapshot_url"),
 }
 
 # Not a destination Bambuddy requests — no guard applies.
@@ -750,16 +757,10 @@ NOT_A_FETCH_TARGET = {
     ("OrcaAuthFinishRequest", "callback_url"),  # parsed locally for OAuth state; never fetched by Grove
 }
 
-# Genuinely unguarded, and deliberately recorded rather than quietly exempted.
-# These reach `external_camera.capture_frame`, which dials rtsp:// as well as
-# http(s):// — the LAN-service guard rejects any non-HTTP scheme, so wiring it
-# up as-is would break every RTSP camera. Closing these needs a scheme-aware
-# variant of the guard, not a one-line delegation.
+# Kept for fields that genuinely cannot be routed through a guard. A new entry
+# requires an explicit security review rather than quietly becoming an
+# exemption.
 KNOWN_UNGUARDED_NEEDS_SCHEME_AWARE_GUARD = {
-    ("PrinterCreate", "external_camera_url"),
-    ("PrinterCreate", "external_camera_snapshot_url"),
-    ("PrinterUpdate", "external_camera_url"),
-    ("PrinterUpdate", "external_camera_snapshot_url"),
 }
 
 

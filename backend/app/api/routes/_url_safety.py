@@ -13,9 +13,10 @@ property of the *service*, not of the caller:
   address is an SSRF probe rather than a configuration. Used for OIDC issuer
   and icon URLs.
 
-Both reject the cases that are dangerous regardless of topology: non-HTTP
-schemes, numeric-encoded IPs, cloud-metadata endpoints, multicast and
-unspecified addresses, and IPv4-mapped IPv6 encodings of any of the above.
+Each caller supplies the protocol schemes it actually supports. All callers
+reject destinations that are dangerous regardless of topology:
+numeric-encoded IPs, cloud-metadata endpoints, multicast and unspecified
+addresses, and IPv4-mapped IPv6 encodings of any of the above.
 
 The LAN-service policy lives here because it now has several callers; the
 public-internet policy stays in ``_oidc_helpers`` next to its only consumer.
@@ -133,7 +134,25 @@ def _resolve_lan_addresses(hostname: str, port: int, *, label: str) -> tuple[str
     return (str(unwrap_ipv4_mapped(addr)),)
 
 
-def assert_safe_lan_service_url(url: str, *, label: str, resolve_hostname: bool = False) -> None:
+def resolve_safe_lan_addresses(hostname: str, port: int, *, label: str) -> tuple[str, ...]:
+    """Resolve *hostname* once and return addresses allowed by the LAN policy.
+
+    Callers that do not use httpx's transport need the same connect-time
+    protection as :func:`lan_service_transport`.  In particular, the returned
+    addresses must be used for the socket connection; resolving here and then
+    resolving again in a different client would reintroduce a DNS-rebinding
+    window.
+    """
+    return _resolve_lan_addresses(hostname, port, label=label)
+
+
+def assert_safe_lan_service_url(
+    url: str,
+    *,
+    label: str,
+    resolve_hostname: bool = False,
+    allowed_schemes: tuple[str, ...] = ("http", "https"),
+) -> None:
     """Raise ValueError if *url* is unsafe for a service that may live on the LAN.
 
     ``label`` names the setting in the error message ("Spoolman URL", "ntfy
@@ -147,10 +166,10 @@ def assert_safe_lan_service_url(url: str, *, label: str, resolve_hostname: bool 
 
     What is rejected is dangerous under any topology:
 
-    - Schemes other than http/https. ``httpx`` already raises
-      ``UnsupportedProtocol`` for ``file://``/``gopher://`` etc., so this is
-      about returning a clear validation error at configuration time rather
-      than an opaque failure at delivery time.
+    - Schemes outside *allowed_schemes*. HTTP integrations use the default
+      ``http``/``https`` pair; scheme-aware LAN clients such as external
+      cameras can opt into their supported protocol schemes while retaining
+      the same destination policy.
     - Numeric-encoded IPv4 (decimal ``2130706433``, hex ``0x7f000001``) —
       libc and browsers resolve these, but Python's ``ipaddress`` raises
       ValueError on them, so they would slip past the checks below.
@@ -168,8 +187,12 @@ def assert_safe_lan_service_url(url: str, *, label: str, resolve_hostname: bool 
     connection time so a DNS answer cannot change between validation and use.
     """
     parsed = urlparse(url)
-    if parsed.scheme.lower() not in ("http", "https"):
-        raise ValueError(f"{label} must use http or https")
+    scheme = parsed.scheme.lower()
+    if scheme not in allowed_schemes:
+        if allowed_schemes == ("http", "https"):
+            raise ValueError(f"{label} must use http or https")
+        schemes = ", ".join(allowed_schemes)
+        raise ValueError(f"{label} must use one of: {schemes}")
 
     hostname = (parsed.hostname or "").lower()
     normalized_hostname = hostname.rstrip(".")
@@ -190,8 +213,11 @@ def assert_safe_lan_service_url(url: str, *, label: str, resolve_hostname: bool 
         addr = ipaddress.ip_address(normalized_hostname)
     except ValueError:
         if resolve_hostname:
+            default_port = {"https": 443, "rtsps": 322, "rtsp": 554}.get(scheme, 80)
             _resolve_lan_addresses(
-                hostname, parsed.port or (443 if parsed.scheme.lower() == "https" else 80), label=label
+                hostname,
+                parsed.port or default_port,
+                label=label,
             )
         return  # symbolic hostname — checked authoritatively by the transport
 
@@ -211,7 +237,7 @@ class _LanServiceAddressBackend:
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         if isinstance(host, bytes):
             host = host.decode("ascii")
-        addresses = _resolve_lan_addresses(host, port, label="LAN service URL")
+        addresses = resolve_safe_lan_addresses(host, port, label="LAN service URL")
         return await self._delegate.connect_tcp(
             addresses[0],
             port,
