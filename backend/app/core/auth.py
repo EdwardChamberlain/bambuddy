@@ -347,12 +347,18 @@ def require_energy_cost_update():
                         detail="Invalid API key",
                         headers={"WWW-Authenticate": "Bearer"},
                     )
+                if api_key.user_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="This API-keyed operation requires an active API key owner",
+                    )
+                owner = await _resolve_api_key_permission_owner(db, api_key)
                 if not api_key.can_update_energy_cost:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="API key does not have 'update_energy_cost' permission",
                     )
-                return None
+                return owner
 
             # JWT path
             if credentials is None:
@@ -1382,6 +1388,25 @@ async def caller_is_api_key(
     if x_api_key:
         return True
     return credentials is not None and credentials.credentials.startswith("bb_")
+
+
+async def require_api_key_owner(
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
+    is_api_key: bool = Depends(caller_is_api_key),
+) -> User | None:
+    """Return the active API-key owner, rejecting legacy ownerless keys.
+
+    Ownership-scoped routes must not treat a legacy ownerless key as an
+    anonymous/global caller. JWT and auth-disabled callers still receive None;
+    their normal route permissions retain the existing single-tenant/global
+    semantics.
+    """
+    if is_api_key and api_key_owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This API-keyed operation requires an active API key owner",
+        )
+    return api_key_owner
 
 
 def check_permission(api_key: APIKey, permission: str) -> None:

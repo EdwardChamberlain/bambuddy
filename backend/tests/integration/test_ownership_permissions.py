@@ -1820,6 +1820,10 @@ class TestProjectOwnershipBoundaries(TestOwnershipPermissionsSetup):
         db_session.add(project)
         await db_session.flush()
 
+        child = Project(name="Shared child", parent_id=project.id, target_count=1)
+        db_session.add(child)
+        await db_session.flush()
+
         printer = await printer_factory()
         owned_archive = await archive_factory(
             printer.id,
@@ -1832,6 +1836,20 @@ class TestProjectOwnershipBoundaries(TestOwnershipPermissionsSetup):
             print_name="Other archive",
             created_by_id=auth_setup["operator2_user"]["id"],
             project_id=project.id,
+        )
+        await archive_factory(
+            printer.id,
+            print_name="Owned child archive",
+            status="failed",
+            created_by_id=auth_setup["operator_user"]["id"],
+            project_id=child.id,
+        )
+        await archive_factory(
+            printer.id,
+            print_name="Other child archive",
+            status="completed",
+            created_by_id=auth_setup["operator2_user"]["id"],
+            project_id=child.id,
         )
         owned_item = PrintQueueItem(
             printer_id=printer.id,
@@ -1866,6 +1884,23 @@ class TestProjectOwnershipBoundaries(TestOwnershipPermissionsSetup):
         timeline = timeline_response.json()
         assert all((event.get("metadata") or {}).get("archive_id") != other_archive.id for event in timeline)
         assert all((event.get("metadata") or {}).get("queue_item_id") != other_item.id for event in timeline)
+
+        list_response = await async_client.get("/api/v1/projects/", headers=headers)
+        assert list_response.status_code == 200, list_response.text
+        listed_project = next(item for item in list_response.json() if item["id"] == project.id)
+        assert listed_project["archive_count"] == 1
+        assert listed_project["queue_count"] == 1
+        assert [item["id"] for item in listed_project["archives"]] == [owned_archive.id]
+
+        detail_response = await async_client.get(f"/api/v1/projects/{project.id}", headers=headers)
+        assert detail_response.status_code == 200, detail_response.text
+        detail = detail_response.json()
+        assert detail["stats"]["total_archives"] == 1
+        assert detail["stats"]["queued_prints"] == 1
+        assert detail["stats"]["completed_prints"] == 1
+        assert len(detail["children"]) == 1
+        assert detail["children"][0]["id"] == child.id
+        assert detail["children"][0]["progress_percent"] == 0.0
 
         remove_response = await async_client.post(
             f"/api/v1/projects/{project.id}/remove-archives",
