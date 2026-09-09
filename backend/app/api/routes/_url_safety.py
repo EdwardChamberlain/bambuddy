@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from urllib.parse import urlparse
+
+import httpx
 
 # Cloud-provider metadata endpoints — the classic SSRF credential-exfil
 # targets. Both guards reject these unconditionally.
@@ -75,7 +78,62 @@ def unwrap_ipv4_mapped(
     return addr
 
 
-def assert_safe_lan_service_url(url: str, *, label: str) -> None:
+def _assert_safe_lan_address(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    *,
+    label: str,
+) -> None:
+    """Reject an address that is dangerous regardless of LAN topology."""
+    effective = unwrap_ipv4_mapped(addr)
+
+    if effective in CLOUD_METADATA_IPS:
+        raise ValueError(f"{label} must not point to a cloud metadata endpoint")
+    if effective.is_multicast or effective.is_unspecified:
+        raise ValueError(f"{label} must not point to a multicast or unspecified address")
+
+
+def _resolve_lan_addresses(hostname: str, port: int, *, label: str) -> tuple[str, ...]:
+    """Resolve *hostname* and return addresses safe for a LAN-service request.
+
+    Private and link-local addresses remain valid here because integrations such
+    as Home Assistant and Spoolman commonly run on the same host or LAN. Only
+    destinations that are invalid under every topology are rejected.
+    """
+    normalized_hostname = hostname.rstrip(".")
+    if not normalized_hostname:
+        raise ValueError(f"{label} must include a hostname")
+    if NUMERIC_IP_RE.match(normalized_hostname):
+        raise ValueError(f"{label} must not use numeric-encoded IP addresses; use standard dotted-decimal notation")
+
+    try:
+        addr = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        try:
+            address_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{label} hostname could not be resolved") from exc
+        if not address_infos:
+            raise ValueError(f"{label} hostname could not be resolved")
+
+        addresses: list[str] = []
+        for address_info in address_infos:
+            sockaddr = address_info[4]
+            address_text = sockaddr[0] if sockaddr else ""
+            try:
+                resolved = ipaddress.ip_address(address_text.split("%", 1)[0])
+            except ValueError:
+                raise ValueError(f"{label} hostname resolved to an invalid address") from None
+            _assert_safe_lan_address(resolved, label=label)
+            address = str(unwrap_ipv4_mapped(resolved))
+            if address not in addresses:
+                addresses.append(address)
+        return tuple(addresses)
+
+    _assert_safe_lan_address(addr, label=label)
+    return (str(unwrap_ipv4_mapped(addr)),)
+
+
+def assert_safe_lan_service_url(url: str, *, label: str, resolve_hostname: bool = False) -> None:
     """Raise ValueError if *url* is unsafe for a service that may live on the LAN.
 
     ``label`` names the setting in the error message ("Spoolman URL", "ntfy
@@ -102,39 +160,82 @@ def assert_safe_lan_service_url(url: str, *, label: str) -> None:
       indicative of misuse.
     - IPv4-mapped IPv6 encodings of any of the above.
 
-    Symbolic hostnames are otherwise accepted without DNS resolution, matching
-    the public-internet guard: resolution here would be both a TOCTOU (DNS can
-    change between validation and request) and a request the validator
-    shouldn't be making. The one exception is the fixed set of cloud-metadata
-    hostnames, which is a literal-string match and needs no resolution.
+    Symbolic hostnames are accepted without DNS resolution by default so schema
+    validation remains network-free and local-only names can be configured while
+    offline. Callers that need an early DNS check can pass
+    ``resolve_hostname=True``. Actual HTTP requests must additionally use
+    ``lan_service_transport()`` below, which validates and pins the address at
+    connection time so a DNS answer cannot change between validation and use.
     """
     parsed = urlparse(url)
     if parsed.scheme.lower() not in ("http", "https"):
         raise ValueError(f"{label} must use http or https")
 
     hostname = (parsed.hostname or "").lower()
+    normalized_hostname = hostname.rstrip(".")
 
     # "http:///path" parses to an empty hostname. Never a valid destination,
     # and without this it falls through the ip_address() ValueError branch
     # below and is accepted as if it were a symbolic hostname.
-    if not hostname:
+    if not normalized_hostname:
         raise ValueError(f"{label} must include a hostname")
 
-    if hostname in CLOUD_METADATA_HOSTNAMES:
+    if normalized_hostname in CLOUD_METADATA_HOSTNAMES:
         raise ValueError(f"{label} must not point to a cloud metadata endpoint")
 
-    if NUMERIC_IP_RE.match(hostname):
+    if NUMERIC_IP_RE.match(normalized_hostname):
         raise ValueError(f"{label} must not use numeric-encoded IP addresses; use standard dotted-decimal notation")
 
     try:
-        addr = ipaddress.ip_address(hostname)
+        addr = ipaddress.ip_address(normalized_hostname)
     except ValueError:
-        return  # symbolic hostname — out of scope by design (no DNS check)
+        if resolve_hostname:
+            _resolve_lan_addresses(
+                hostname, parsed.port or (443 if parsed.scheme.lower() == "https" else 80), label=label
+            )
+        return  # symbolic hostname — checked authoritatively by the transport
 
-    effective = unwrap_ipv4_mapped(addr)
+    _assert_safe_lan_address(addr, label=label)
 
-    if effective in CLOUD_METADATA_IPS:
-        raise ValueError(f"{label} must not point to a cloud metadata endpoint")
 
-    if effective.is_multicast or effective.is_unspecified:
-        raise ValueError(f"{label} must not point to a multicast or unspecified address")
+class _LanServiceAddressBackend:
+    """httpcore backend that validates and pins each LAN-service connection."""
+
+    def __init__(self, delegate=None) -> None:
+        if delegate is None:
+            from httpcore._backends.auto import AutoBackend
+
+            delegate = AutoBackend()
+        self._delegate = delegate
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        if isinstance(host, bytes):
+            host = host.decode("ascii")
+        addresses = _resolve_lan_addresses(host, port, label="LAN service URL")
+        return await self._delegate.connect_tcp(
+            addresses[0],
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return await self._delegate.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
+
+    async def sleep(self, seconds):
+        await self._delegate.sleep(seconds)
+
+
+class _LanServiceTransport(httpx.AsyncHTTPTransport):
+    """HTTP transport that preserves the original Host/SNI while pinning DNS."""
+
+    def __init__(self) -> None:
+        # A proxy would perform its own DNS lookup and bypass this policy.
+        super().__init__(trust_env=False)
+        self._pool._network_backend = _LanServiceAddressBackend()
+
+
+def lan_service_transport() -> httpx.AsyncHTTPTransport:
+    """Return the SSRF-safe transport for operator-configured LAN services."""
+    return _LanServiceTransport()

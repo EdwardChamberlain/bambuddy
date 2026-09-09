@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import httpx
 from sqlalchemy import select
 
+from backend.app.api.routes._url_safety import lan_service_transport
 from backend.app.core.database import async_session
 from backend.app.models.printer import Printer
 from backend.app.models.settings import Settings
@@ -263,7 +264,11 @@ class ObicoDetectionService:
         ml_url = f"{settings['ml_url']}/p/"
 
         try:
-            async with httpx.AsyncClient(timeout=DETECTION_TIMEOUT) as client:
+            async with httpx.AsyncClient(
+                timeout=DETECTION_TIMEOUT,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 resp = await client.get(ml_url, params={"img": snapshot_url})
                 resp.raise_for_status()
                 payload = resp.json()
@@ -361,7 +366,11 @@ class ObicoDetectionService:
 
         target = f"{url.rstrip('/')}/hc/"
         try:
-            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
+            async with httpx.AsyncClient(
+                timeout=HEALTH_TIMEOUT,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 resp = await client.get(target)
             body = resp.text.strip()
             return {

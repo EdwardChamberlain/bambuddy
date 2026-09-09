@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from backend.app.api.routes._url_safety import lan_service_transport
+
 if TYPE_CHECKING:
     from backend.app.models.smart_plug import SmartPlug
 
@@ -43,7 +45,11 @@ class HomeAssistantService:
             return {"state": None, "reachable": False, "device_name": None}
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.get(
                     f"{self.base_url}/api/states/{plug.ha_entity_id}",
                     headers=self._headers(),
@@ -98,7 +104,11 @@ class HomeAssistantService:
         domain = plug.ha_entity_id.split(".")[0]  # "switch", "light", etc.
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.post(
                     f"{self.base_url}/api/services/{domain}/{action}",
                     headers=self._headers(),
@@ -125,7 +135,11 @@ class HomeAssistantService:
         total = None
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 # Fetch power from dedicated sensor entity if configured
                 if plug.ha_power_entity:
                     power = await self._get_sensor_value(client, plug.ha_power_entity)
@@ -234,7 +248,11 @@ class HomeAssistantService:
         if not safe_url:
             return {"success": False, "message": None, "error": "Invalid Home Assistant URL"}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.get(
                     f"{safe_url.rstrip('/')}/api/",
                     headers={"Authorization": f"Bearer {token}"},

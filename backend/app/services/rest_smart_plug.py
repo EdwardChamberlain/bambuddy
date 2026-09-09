@@ -98,7 +98,13 @@ class RESTSmartPlugService:
             return None
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            from backend.app.api.routes._url_safety import lan_service_transport
+
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 kwargs: dict[str, Any] = {"headers": headers or {}}
                 if body is not None:
                     # Try to detect if body is JSON
@@ -276,7 +282,13 @@ class RESTSmartPlugService:
         parsed_headers = self._parse_headers(headers)
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            from backend.app.api.routes._url_safety import lan_service_transport
+
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.request(method.upper(), url, headers=parsed_headers)
                 response.raise_for_status()
                 return {"success": True, "error": None}

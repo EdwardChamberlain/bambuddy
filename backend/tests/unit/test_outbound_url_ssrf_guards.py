@@ -94,6 +94,74 @@ def test_lan_tier_permits_the_normal_self_hosted_topology(url: str):
     assert_safe_lan_service_url(url, label="Test URL")
 
 
+def test_lan_tier_rejects_hostname_resolving_to_metadata(monkeypatch):
+    """A DNS name must not bypass the universal metadata blocklist."""
+
+    def fake_getaddrinfo(*_args, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("169.254.169.254", 80))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError, match="cloud metadata"):
+        assert_safe_lan_service_url("http://attacker.example/", label="Test URL", resolve_hostname=True)
+
+
+def test_lan_tier_rejects_metadata_hostname_with_trailing_dot():
+    with pytest.raises(ValueError, match="cloud metadata"):
+        assert_safe_lan_service_url("http://metadata.google.internal./", label="Test URL")
+
+
+@pytest.mark.asyncio
+async def test_lan_transport_pins_a_safe_private_dns_address(monkeypatch):
+    """The LAN transport validates DNS and connects to that validated address."""
+    from backend.app.api.routes._url_safety import _LanServiceAddressBackend
+
+    seen_hosts = []
+
+    class FakeNetworkBackend:
+        async def connect_tcp(self, host, port, **kwargs):
+            seen_hosts.append((host, port))
+            return object()
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("192.168.1.50", 8123))
+        ],
+    )
+
+    await _LanServiceAddressBackend(FakeNetworkBackend()).connect_tcp("ha.example", 8123)
+
+    assert seen_hosts == [("192.168.1.50", 8123)]
+
+
+@pytest.mark.asyncio
+async def test_lan_transport_rejects_metadata_before_connecting(monkeypatch):
+    """A hostile DNS answer must never reach the delegated socket backend."""
+    from backend.app.api.routes._url_safety import _LanServiceAddressBackend
+
+    connected = False
+
+    class FakeNetworkBackend:
+        async def connect_tcp(self, host, port, **kwargs):
+            nonlocal connected
+            connected = True
+            return object()
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("100.100.100.200", 80))
+        ],
+    )
+
+    with pytest.raises(ValueError, match="cloud metadata"):
+        await _LanServiceAddressBackend(FakeNetworkBackend()).connect_tcp("attacker.example", 80)
+
+    assert connected is False
+
+
 def test_lan_tier_names_the_field_in_its_error():
     with pytest.raises(ValueError, match="ntfy server URL"):
         assert_safe_lan_service_url("file:///etc/passwd", label="ntfy server URL")
