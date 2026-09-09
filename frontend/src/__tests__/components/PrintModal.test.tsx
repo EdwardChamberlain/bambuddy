@@ -403,7 +403,17 @@ describe('PrintModal', () => {
       });
     });
 
-    it('shows print options toggle', async () => {
+    it('keeps print modal option sections collapsed for direct printer-page prints', async () => {
+      server.use(
+        http.get('/api/v1/archives/:id/filament-requirements', () =>
+          HttpResponse.json({
+            filaments: [
+              { slot_id: 1, type: 'PLA', color: '#FF0000', used_grams: 10, used_meters: 3 },
+            ],
+          }),
+        ),
+      );
+
       render(
         <PrintModal
           mode="create"
@@ -416,8 +426,11 @@ describe('PrintModal', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText('Print Options')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Print Options' })).toHaveAttribute('aria-expanded', 'false');
       });
+      expect(screen.getByRole('button', { name: /Filament Mapping/i })).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.getByRole('button', { name: /Queue options/i })).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByText('Auto-level bed before print')).not.toBeInTheDocument();
     });
 
     it('keeps model filament controls collapsed until they are needed', async () => {
@@ -579,6 +592,7 @@ describe('PrintModal', () => {
         />
       );
 
+      await user.click(await screen.findByRole('button', { name: /Filament Mapping/i }));
       const forceMatch = await screen.findByLabelText(/Match colour/i) as HTMLInputElement;
       expect(forceMatch).toBeChecked();
 
@@ -625,6 +639,7 @@ describe('PrintModal', () => {
         />
       );
 
+      await user.click(await screen.findByRole('button', { name: /Filament Mapping/i }));
       const forceMatch = await screen.findByLabelText(/Match colour/i) as HTMLInputElement;
       await user.click(forceMatch);
       expect(forceMatch).not.toBeChecked();
@@ -681,6 +696,7 @@ describe('PrintModal', () => {
         />
       );
 
+      await user.click(await screen.findByRole('button', { name: /Filament Mapping/i }));
       const mappingSelect = await waitFor(() => {
         const select = screen
           .getAllByRole('combobox')

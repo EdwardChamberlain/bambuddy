@@ -180,7 +180,7 @@ export function ScheduleOptionsPanel({
 
   return (
     <div className="mb-4">
-      <button type="button" onClick={() => setIsExpanded(!isExpanded)} className="flex w-full items-center gap-2 text-sm text-bambu-gray transition-colors hover:text-white">
+      <button type="button" onClick={() => setIsExpanded(!isExpanded)} aria-expanded={isExpanded} className="flex w-full items-center gap-2 text-sm text-bambu-gray transition-colors hover:text-white">
         <ListOrdered className="w-4 h-4" />
         <span>{t('printModal.queueOptions', 'Queue options')}</span>
         {isExpanded ? <ChevronUp className="ml-auto w-4 h-4" /> : <ChevronDown className="ml-auto w-4 h-4" />}

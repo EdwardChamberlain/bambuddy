@@ -1226,7 +1226,7 @@ export function PrintModal({
                 filamentReqs={effectiveFilamentReqs}
                 manualMappings={manualMappings}
                 onManualMappingChange={handleManualMappingChange}
-                defaultExpanded={!!initialSelectedPrinterIds?.length || (settings?.per_printer_mapping_expanded ?? false)}
+                defaultExpanded={settings?.per_printer_mapping_expanded ?? false}
                 currencySymbol={currencySymbol}
                 defaultCostPerKg={defaultCostPerKg}
                 forceColorMatch={forceColorMatch}
@@ -1260,7 +1260,6 @@ export function PrintModal({
               <PrintOptionsPanel
                 options={printOptions}
                 onChange={setPrintOptions}
-                defaultExpanded={!!initialSelectedPrinterIds?.length}
                 showDualNozzleOptions={showDualNozzleOptions}
               />
             )}

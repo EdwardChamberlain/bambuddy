@@ -46,6 +46,7 @@ export function PrintOptionsPanel({
       <button
         type="button"
         onClick={() => setIsExpanded(!isExpanded)}
+        aria-expanded={isExpanded}
         className="flex items-center gap-2 text-sm text-bambu-gray hover:text-white transition-colors w-full"
       >
         <Settings className="w-4 h-4" />
