@@ -199,7 +199,12 @@ jobs:
 
       - name: Install Chromium for browser tests
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: |
+          # Playwright installs its own Chromium. A stale Google Chrome APT
+          # index on the hosted runner can otherwise fail this setup step
+          # before the browser tests get a chance to run.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          npx playwright install --with-deps chromium
 
       - name: Run browser tests
         timeout-minutes: 5
