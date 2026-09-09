@@ -61,9 +61,7 @@ class TestCameraUrlSecurity:
             lambda host, port, *, label: ("192.168.1.50",),
         )
 
-        prepared = await external_camera._prepare_rtsp_url(
-            "rtsp://camera-user:camera-secret@camera.example:554/stream"
-        )
+        prepared = await external_camera._prepare_rtsp_url("rtsp://camera-user:camera-secret@camera.example:554/stream")
 
         assert prepared == (
             "rtsp://camera-user:camera-secret@192.168.1.50:554/stream",
@@ -83,8 +81,7 @@ class TestCameraUrlSecurity:
 
     @pytest.mark.asyncio
     async def test_rtsps_proxy_receives_checked_address(self, monkeypatch):
-        from backend.app.services import camera
-        from backend.app.services import external_camera
+        from backend.app.services import camera, external_camera
 
         monkeypatch.setattr(
             external_camera,

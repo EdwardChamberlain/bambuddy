@@ -760,8 +760,7 @@ NOT_A_FETCH_TARGET = {
 # Kept for fields that genuinely cannot be routed through a guard. A new entry
 # requires an explicit security review rather than quietly becoming an
 # exemption.
-KNOWN_UNGUARDED_NEEDS_SCHEME_AWARE_GUARD = {
-}
+KNOWN_UNGUARDED_NEEDS_SCHEME_AWARE_GUARD = {}
 
 
 def test_the_route_walk_actually_finds_something():
