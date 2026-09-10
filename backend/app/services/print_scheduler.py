@@ -24,8 +24,10 @@ from backend.app.models.smart_plug import SmartPlug
 from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
 from backend.app.services.bambu_ftp import (
+    UploadCancelled,
     cache_3mf_download,
     delete_file_async,
+    ftps_handshake_cooloff_deadline,
     get_ftp_retry_settings,
     upload_file_async,
     with_ftp_retry,
@@ -1828,6 +1830,7 @@ class PrintScheduler:
             "natural completion" if wait_for_natural_completion else "stop requested",
             active_ams_ids,
         )
+
         return False
 
     async def _get_setting(self, db: AsyncSession, key: str) -> str | None:
@@ -2696,6 +2699,8 @@ class PrintScheduler:
             f"retry_enabled={ftp_retry_enabled}, retry_count={ftp_retry_count}, timeout={ftp_timeout}"
         )
 
+        cooloff_before = ftps_handshake_cooloff_deadline(printer.ip_address)
+
         # Delete existing file if present (avoids 553 error on overwrite)
         try:
             logger.debug("Queue item %s: Deleting existing file %s if present...", item.id, remote_path)
@@ -2705,11 +2710,13 @@ class PrintScheduler:
                 remote_path,
                 socket_timeout=ftp_timeout,
                 printer_model=printer.model,
+                respect_handshake_cooloff=False,
             )
             logger.debug("Queue item %s: Delete result: %s", item.id, delete_result)
         except Exception as e:
             logger.debug("Queue item %s: Delete failed (may not exist): %s", item.id, e)
 
+        upload_error: str | None = None
         try:
             if ftp_retry_enabled:
                 uploaded = await with_ftp_retry(
@@ -2720,6 +2727,8 @@ class PrintScheduler:
                     remote_path,
                     socket_timeout=ftp_timeout,
                     printer_model=printer.model,
+                    respect_handshake_cooloff=False,
+                    cooloff_ip=None,
                     max_retries=ftp_retry_count,
                     retry_delay=ftp_retry_delay,
                     operation_name=f"Upload print to {printer.name}",
@@ -2732,7 +2741,15 @@ class PrintScheduler:
                     remote_path,
                     socket_timeout=ftp_timeout,
                     printer_model=printer.model,
+                    respect_handshake_cooloff=False,
                 )
+        except UploadCancelled as e:
+            uploaded = False
+            upload_error = (
+                "Upload was too slow to finish and was cancelled. The printer's connection could not sustain "
+                "the transfer — check its Wi-Fi signal, or move it closer to the access point."
+            )
+            logger.error("Queue item %s: upload deadline exceeded: %s", item.id, e)
         except Exception as e:
             uploaded = False
             logger.error("Queue item %s: FTP error: %s (type: %s)", item.id, e, type(e).__name__)
@@ -2742,9 +2759,14 @@ class PrintScheduler:
             injected_path.unlink(missing_ok=True)
 
         if not uploaded:
-            error_msg = (
-                "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
-                "See server logs for detailed diagnostics."
+            cooloff_after = ftps_handshake_cooloff_deadline(printer.ip_address)
+            error_msg = upload_error or (
+                "The printer's file service did not answer over TLS; the SD card is not involved."
+                if cooloff_after is not None and cooloff_after != cooloff_before
+                else (
+                    "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
+                    "See server logs for detailed diagnostics."
+                )
             )
             item.status = "failed"
             item.error_message = error_msg

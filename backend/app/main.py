@@ -2986,6 +2986,7 @@ async def on_print_start(printer_id: int, data: dict):
                             max_retries=ftp_retry_count,
                             retry_delay=ftp_retry_delay,
                             operation_name=f"Download 3MF from {remote_path}",
+                            cooloff_ip=printer.ip_address,
                             non_retry_exceptions=(FileNotOnPrinterError,),
                         )
                     else:
@@ -3058,6 +3059,7 @@ async def on_print_start(printer_id: int, data: dict):
                                     max_retries=ftp_retry_count,
                                     retry_delay=ftp_retry_delay,
                                     operation_name=f"Download 3MF from {remote_full_path}",
+                                    cooloff_ip=printer.ip_address,
                                 )
                             else:
                                 downloaded = await download_file_async(
@@ -3122,6 +3124,7 @@ async def on_print_start(printer_id: int, data: dict):
                                         max_retries=ftp_retry_count,
                                         retry_delay=ftp_retry_delay,
                                         operation_name=f"Re-download 3MF from {remote_path}",
+                                        cooloff_ip=printer.ip_address,
                                         non_retry_exceptions=(FileNotOnPrinterError,),
                                     )
                                 else:
