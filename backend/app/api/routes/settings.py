@@ -247,6 +247,7 @@ async def _build_settings_response(db: AsyncSession, is_api_key: bool = False) -
             "mqtt_port",
             "forecast_global_lead_time_days",
             "session_max_hours",
+            "slicer_stall_timeout_minutes",
         ]:
             settings_dict[setting.key] = int(setting.value)
         elif setting.key == "default_printer_id":
