@@ -1,6 +1,7 @@
 """Unit tests for REST smart plug service."""
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -44,11 +45,39 @@ class TestURLValidation:
     def test_hostname_url(self, service):
         assert service._validate_url("http://openhab.local:8080/api") is True
 
-    def test_loopback_blocked(self, service):
-        assert service._validate_url("http://127.0.0.1/api") is False
+    def test_loopback_allowed(self, service):
+        """Deliberate change: the LAN-service policy permits loopback, because
+        an openHAB/Node-RED bridge on the same host is the normal topology.
 
-    def test_link_local_blocked(self, service):
-        assert service._validate_url("http://169.254.1.1/api") is False
+        The previous check rejected a literal 127.0.0.1 while accepting the
+        equivalent "localhost", so the same target was configurable one way and
+        not the other. See test_outbound_url_ssrf_guards.py for the policy.
+        """
+        assert service._validate_url("http://127.0.0.1/api") is True
+
+    def test_link_local_allowed(self, service):
+        """Also deliberate: a generic APIPA address is a LAN host like any
+        other. The cloud-metadata address inside that range is blocked by
+        name, not by rejecting the whole /16 — see test_metadata_blocked."""
+        assert service._validate_url("http://169.254.1.1/api") is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.100.100.200/",
+            "http://[fd00:ec2::254]/",
+            "http://metadata.google.internal/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://2130706433/",
+            "http://0.0.0.0/",
+        ],
+    )
+    def test_metadata_and_encoded_targets_blocked(self, service, url):
+        """The gap the previous hand-rolled check left: anything that was not a
+        bare IP literal fell through to True, and the literals it did parse were
+        only tested for loopback/link-local."""
+        assert service._validate_url(url) is False
 
     def test_empty_hostname(self, service):
         assert service._validate_url("http:///api") is False
@@ -67,6 +96,38 @@ class TestParseHeaders:
 
     def test_invalid_json(self, service):
         assert service._parse_headers("not json") == {}
+
+    def test_invalid_json_does_not_log_header_values(self, service, caplog):
+        caplog.set_level(logging.WARNING)
+        secret = "super-secret-bearer-token"
+
+        assert service._parse_headers(f'{{"Authorization": "Bearer {secret}"') == {}
+
+        assert secret not in caplog.text
+
+
+class TestCredentialRedaction:
+    @pytest.mark.asyncio
+    async def test_invalid_url_log_redacts_userinfo(self, service, caplog):
+        caplog.set_level(logging.WARNING)
+        secret = "url-secret"
+
+        await service._send_request(f"http://user:{secret}@169.254.169.254/latest/meta-data/")
+
+        assert secret not in caplog.text
+        assert "[REDACTED]" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_success_log_redacts_userinfo(self, service, mock_plug, caplog):
+        caplog.set_level(logging.INFO)
+        secret = "url-secret"
+        mock_plug.rest_on_url = f"http://user:{secret}@192.168.1.50:8080/api/on"
+
+        with patch.object(service, "_send_request", new_callable=AsyncMock, return_value=MagicMock()):
+            assert await service.turn_on(mock_plug) is True
+
+        assert secret not in caplog.text
+        assert "[REDACTED]" in caplog.text
 
 
 class TestExtractJsonPath:
@@ -315,6 +376,10 @@ class TestTestConnection:
 
     @pytest.mark.asyncio
     async def test_connection_invalid_url(self, service):
-        result = await service.test_connection("http://127.0.0.1/api")
+        """127.0.0.1 is now permitted (see TestURLValidation), so the rejection
+        case here is a target that is out of policy under any topology. The
+        error is the guard's own message rather than a fixed sentence, so the
+        user learns which rule the URL broke."""
+        result = await service.test_connection("http://169.254.169.254/latest/meta-data/")
         assert result["success"] is False
-        assert "blocked" in result["error"].lower()
+        assert "cloud metadata" in result["error"].lower()

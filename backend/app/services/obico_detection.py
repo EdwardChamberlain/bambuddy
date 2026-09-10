@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import httpx
 from sqlalchemy import select
 
+from backend.app.api.routes._url_safety import lan_service_transport
 from backend.app.core.database import async_session
 from backend.app.models.printer import Printer
 from backend.app.models.settings import Settings
@@ -263,7 +264,11 @@ class ObicoDetectionService:
         ml_url = f"{settings['ml_url']}/p/"
 
         try:
-            async with httpx.AsyncClient(timeout=DETECTION_TIMEOUT) as client:
+            async with httpx.AsyncClient(
+                timeout=DETECTION_TIMEOUT,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 resp = await client.get(ml_url, params={"img": snapshot_url})
                 resp.raise_for_status()
                 payload = resp.json()
@@ -342,10 +347,30 @@ class ObicoDetectionService:
         }
 
     async def test_connection(self, url: str) -> dict:
-        """Ping the ML API health endpoint. Returns {ok, status_code, body, error}."""
+        """Ping the ML API health endpoint. Returns {ok, status_code, body, error}.
+
+        The stored ``obico_ml_url`` setting is validated at the schema layer,
+        but this route takes its URL from the request body, so the same
+        LAN-service policy has to be applied here or the guard is trivially
+        sidestepped by testing a URL instead of saving it. The response body
+        is returned to the caller (it is the health signal — the endpoint
+        answers "ok"), which is exactly why the destination must be inside
+        policy before the request is made.
+        """
+        from backend.app.api.routes._url_safety import assert_safe_lan_service_url
+
+        try:
+            assert_safe_lan_service_url(url, label="Obico ML URL")
+        except ValueError as exc:
+            return {"ok": False, "status_code": None, "body": None, "error": str(exc)}
+
         target = f"{url.rstrip('/')}/hc/"
         try:
-            async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
+            async with httpx.AsyncClient(
+                timeout=HEALTH_TIMEOUT,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 resp = await client.get(target)
             body = resp.text.strip()
             return {

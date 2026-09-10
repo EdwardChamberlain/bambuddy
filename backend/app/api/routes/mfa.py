@@ -38,7 +38,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, undefer
 
-from backend.app.api.routes._oidc_helpers import assert_safe_public_https_url
+from backend.app.api.routes._oidc_helpers import assert_safe_public_https_url, public_https_transport
 from backend.app.api.routes.settings import get_setting, set_setting
 from backend.app.core.auth import (
     RequirePermissionIfAuthEnabled,
@@ -117,7 +117,11 @@ async def _fetch_icon_or_400(icon_url: str) -> tuple[bytes, str, str]:
     record of the failure (#1333 review).
     """
     try:
-        assert_safe_public_https_url(icon_url)
+        # The connection transport performs the authoritative DNS check at
+        # socket-connect time. Keep this validation network-free so a mocked
+        # fetch and a temporary DNS outage do not reject a valid URL before
+        # the transport gets a chance to handle it.
+        assert_safe_public_https_url(icon_url, resolve_hostname=False)
     except ValueError as exc:
         logger.warning("OIDC icon URL rejected by SSRF guard: url=%s reason=%s", _redact_url_for_log(icon_url), exc)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1643,7 +1647,8 @@ async def oidc_authorize(
     # Fetch discovery document
     discovery_url = f"{provider.issuer_url.rstrip('/')}/.well-known/openid-configuration"
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        assert_safe_public_https_url(discovery_url, resolve_hostname=False)
+        async with httpx.AsyncClient(timeout=10, transport=public_https_transport(), trust_env=False) as client:
             resp = await client.get(discovery_url)
             resp.raise_for_status()
             discovery = resp.json()
@@ -1765,7 +1770,8 @@ async def oidc_callback(
         # ── Step 1: Fetch discovery document ────────────────────────────────
         discovery_url = f"{provider.issuer_url.rstrip('/')}/.well-known/openid-configuration"
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            assert_safe_public_https_url(discovery_url, resolve_hostname=False)
+            async with httpx.AsyncClient(timeout=10, transport=public_https_transport(), trust_env=False) as client:
                 disc_resp = await client.get(discovery_url)
                 disc_resp.raise_for_status()
                 discovery = disc_resp.json()
@@ -1785,6 +1791,16 @@ async def oidc_callback(
             )
             return RedirectResponse(url=f"{frontend_error_url}invalid_discovery_document", status_code=302)
 
+        # Discovery documents are untrusted input. Apply the public-tier SSRF
+        # policy to every URL that the callback will request, not only to the
+        # originally configured issuer.
+        try:
+            assert_safe_public_https_url(token_endpoint, resolve_hostname=False)
+            assert_safe_public_https_url(jwks_uri, resolve_hostname=False)
+        except ValueError as exc:
+            logger.warning("OIDC discovery document contains unsafe endpoint: %s", exc)
+            return RedirectResponse(url=f"{frontend_error_url}invalid_discovery_document", status_code=302)
+
         # ── Step 2: Exchange authorization code for tokens ───────────────────
         token_form: dict[str, str] = {
             "grant_type": "authorization_code",
@@ -1798,7 +1814,7 @@ async def oidc_callback(
             token_form["code_verifier"] = code_verifier
 
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, transport=public_https_transport(), trust_env=False) as client:
                 token_resp = await client.post(
                     token_endpoint,
                     data=token_form,
@@ -1856,7 +1872,8 @@ async def oidc_callback(
         # are inconsistent between the discovery issuer and the JWT iss claim.
         discovery_issuer: str = discovery.get("issuer", provider.issuer_url).rstrip("/")
         try:
-            async with httpx.AsyncClient(timeout=10) as jwks_http:
+            assert_safe_public_https_url(jwks_uri, resolve_hostname=False)
+            async with httpx.AsyncClient(timeout=10, transport=public_https_transport(), trust_env=False) as jwks_http:
                 jwks_resp = await jwks_http.get(jwks_uri)
                 jwks_resp.raise_for_status()
                 jwks_data = jwks_resp.json()

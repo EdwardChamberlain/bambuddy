@@ -9,6 +9,8 @@ from typing import Literal
 
 import httpx
 
+from backend.app.api.routes._url_safety import lan_service_transport
+
 logger = logging.getLogger(__name__)
 
 BAMBU_RFID_TAG_LENGTH = 32
@@ -114,6 +116,8 @@ class SpoolmanClient:
                 timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0),
                 follow_redirects=False,
                 verify=True,
+                transport=lan_service_transport(),
+                trust_env=False,
                 limits=httpx.Limits(
                     max_keepalive_connections=5,
                     max_connections=10,
