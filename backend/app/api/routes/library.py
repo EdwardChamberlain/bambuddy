@@ -2975,6 +2975,7 @@ async def _try_preview_slice_filaments(
     """
     from backend.app.api.routes.settings import get_setting
     from backend.app.services.slice_preview import get_preview_filaments
+    from backend.app.services.slicer_api import get_stall_timeout_seconds
 
     preferred = (await get_setting(db, "preferred_slicer")) or "bambu_studio"
     if preferred == "orcaslicer":
@@ -3000,6 +3001,7 @@ async def _try_preview_slice_filaments(
         file_name=file_path.name,
         api_url=api_url,
         request_id=request_id,
+        timeout_seconds=await get_stall_timeout_seconds(db),
     )
 
 
@@ -3430,9 +3432,11 @@ async def _run_slicer_with_fallback(
     from backend.app.services.preset_resolver import resolve_preset_ref
     from backend.app.services.slicer_api import (
         SlicerApiServerError,
+        SlicerApiOutputError,
         SlicerApiService,
         SlicerApiUnavailableError,
         SlicerInputError,
+        SlicerTimeoutError,
         get_stall_timeout_seconds,
     )
 
@@ -3686,6 +3690,11 @@ async def _run_slicer_with_fallback(
                     request_id=progress_request_id,
                     on_progress=progress_callback,
                 )
+        except SlicerApiOutputError:
+            # A 2xx response with a corrupt/incomplete 3MF is not a CLI crash.
+            # Do not retry with embedded settings: that could silently switch
+            # back to the source printer/process and defeat output validation.
+            raise
         except SlicerApiServerError as exc:
             rejection = _slicer_rejection_message(str(exc))
             if rejection:
@@ -3726,6 +3735,8 @@ async def _run_slicer_with_fallback(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except SlicerApiUnavailableError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except SlicerTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     finally:
         await service.close()
 

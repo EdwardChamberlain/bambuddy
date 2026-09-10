@@ -38,6 +38,16 @@ class SlicerApiServerError(SlicerApiError):
     settings fallback)."""
 
 
+class SlicerApiOutputError(SlicerApiServerError):
+    """Sidecar returned a successful response with unusable slice output.
+
+    This is deliberately distinct from a slicer process failure: callers may
+    retry a 5xx from a 3MF request with the file's embedded settings, but must
+    not silently accept a corrupt or incomplete successful response by taking
+    that fallback path.
+    """
+
+
 class SlicerInputError(SlicerApiError):
     """Sidecar rejected the input as invalid (4xx)."""
 
@@ -160,7 +170,7 @@ def _validate_sliced_3mf(content: bytes, *, plate: int | None) -> None:
                     if not archive.read(member).strip():
                         raise ValueError(f"empty {member}")
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
-        raise SlicerApiServerError(f"Slicer sidecar returned an incomplete or corrupt 3MF: {exc}") from exc
+        raise SlicerApiOutputError(f"Slicer sidecar returned an incomplete or corrupt 3MF: {exc}") from exc
 
 
 def _handle_slice_response(response: httpx.Response, *, export_3mf: bool, plate: int | None = None) -> SliceResult:
@@ -206,7 +216,7 @@ def _handle_slice_response(response: httpx.Response, *, export_3mf: bool, plate:
             # produce a usable slice. Surface it loudly instead of persisting a
             # corrupt file.
             detail = _format_sidecar_error(response) if len(content) <= 500 else ""
-            raise SlicerApiServerError(
+            raise SlicerApiOutputError(
                 f"Slicer sidecar returned HTTP {response.status_code} but the body is not a valid "
                 f"3MF ({len(content)} bytes). This usually means a misconfigured sidecar, an "
                 f"OrcaSlicer/BambuStudio CLI crash producing no output, or a reverse proxy returning "

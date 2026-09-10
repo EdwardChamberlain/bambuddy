@@ -420,6 +420,41 @@ class TestSliceLibraryFile:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_slicer_stall_fails_with_504(self, async_client: AsyncClient, slice_test_setup, monkeypatch):
+        """A stalled slice is a gateway timeout, not an unexpected 500."""
+        from backend.app.services.slicer_api import SlicerTimeoutError
+
+        class TimeoutService:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def slice_with_profiles(self, **_kwargs):
+                raise SlicerTimeoutError("slicer stalled")
+
+            async def slice_without_profiles(self, **_kwargs):
+                raise AssertionError("a non-3MF slice must not use the fallback")
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(slicer_api_module, "SlicerApiService", TimeoutService)
+        response = await async_client.post(
+            f"/api/v1/library/files/{slice_test_setup['src_file_id']}/slice",
+            json={
+                "printer_preset_id": slice_test_setup["printer_id"],
+                "process_preset_id": slice_test_setup["process_id"],
+                "filament_preset_id": slice_test_setup["filament_id"],
+            },
+        )
+        assert response.status_code == 202
+
+        final = await _wait_for_job(async_client, response.json()["job_id"])
+        assert final["status"] == "failed"
+        assert final["error_status"] == 504
+        assert final["error_detail"] == "slicer stalled"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_3mf_falls_back_to_embedded_settings_on_cli_failure(
         self, async_client: AsyncClient, db_session, slice_test_setup
     ):
@@ -476,6 +511,56 @@ class TestSliceLibraryFile:
         assert final["status"] == "completed", final
         assert final["result"]["used_embedded_settings"] is True
         assert call_count["n"] == 2  # primary + fallback retry
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_incomplete_successful_3mf_does_not_fall_back_to_embedded_settings(
+        self, async_client: AsyncClient, db_session, slice_test_setup
+    ):
+        """A corrupt 200 response is not a CLI crash and must not silently
+        switch the requested printer/process back to the source settings."""
+        src_3mf_path = slice_test_setup["tmp_path"] / "library" / "files" / "incomplete.3mf"
+        src_3mf_path.write_bytes(_make_3mf_with_settings())
+        threemf = LibraryFile(
+            filename="incomplete.3mf",
+            file_path=str(src_3mf_path.relative_to(slice_test_setup["tmp_path"])),
+            file_type="3mf",
+            file_size=src_3mf_path.stat().st_size,
+        )
+        db_session.add(threemf)
+        await db_session.commit()
+        await db_session.refresh(threemf)
+
+        call_count = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not _is_slice_post(request):
+                return httpx.Response(404)
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return httpx.Response(status_code=200, content=b"not a 3MF")
+            return httpx.Response(
+                status_code=200,
+                content=_make_3mf_with_settings(sliced_output=True),
+                headers={"x-print-time-seconds": "1"},
+            )
+
+        _install_mock_sidecar(handler)
+        response = await async_client.post(
+            f"/api/v1/library/files/{threemf.id}/slice",
+            json={
+                "printer_preset_id": slice_test_setup["printer_id"],
+                "process_preset_id": slice_test_setup["process_id"],
+                "filament_preset_id": slice_test_setup["filament_id"],
+            },
+        )
+        assert response.status_code == 202
+
+        final = await _wait_for_job(async_client, response.json()["job_id"])
+        assert final["status"] == "failed"
+        assert final["error_status"] == 502
+        assert "not a valid" in (final["error_detail"] or "")
+        assert call_count["n"] == 1
 
     @pytest.mark.asyncio
     @pytest.mark.integration
