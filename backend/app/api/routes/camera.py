@@ -1139,12 +1139,16 @@ async def camera_snapshot(
     if printer.external_camera_enabled and printer.external_camera_url:
         from backend.app.services.external_camera import capture_frame
 
-        frame_data = await capture_frame(
-            printer.external_camera_url,
-            printer.external_camera_type,
-            timeout=15,
-            snapshot_url=printer.external_camera_snapshot_url,
-        )
+        defer, buffered = live_frame_for_capture(printer_id)
+        if defer:
+            frame_data = buffered
+        else:
+            frame_data = await capture_frame(
+                printer.external_camera_url,
+                printer.external_camera_type,
+                timeout=15,
+                snapshot_url=printer.external_camera_snapshot_url,
+            )
         if not frame_data:
             raise HTTPException(
                 status_code=503,
@@ -1758,13 +1762,17 @@ def _scan_bambu_ffmpeg_pids() -> list[int]:
 
     Two shapes are matched, both unambiguously Bambuddy's:
     - Bambu RTSP: no other software connects to ``rtsp(s)://bblp:``.
-    - External USB (V4L2): an ffmpeg spawned with ``-f v4l2`` is our USB camera
-      stream (#2675). Only orphans are killed — the caller excludes PIDs still in
-      ``_active_streams``, so a live USB stream (now registered there) is spared.
+    - External USB: the stream command carries a private Bambuddy marker. A
+      generic ``-f v4l2`` match is unsafe because other ffmpeg workloads can
+      legitimately use V4L2.
 
     This catches orphans that survive app restarts and are not in any tracking dict.
     """
     import os
+
+    from backend.app.services.external_camera import BAMBUDDY_USB_STREAM_MARKER
+
+    external_usb_marker = BAMBUDDY_USB_STREAM_MARKER.encode()
 
     pids = []
     try:
@@ -1776,9 +1784,14 @@ def _scan_bambu_ffmpeg_pids() -> list[int]:
                     cmdline = f.read()
                 if b"ffmpeg" not in cmdline:
                     continue
-                # Match both rtsp:// (via TLS proxy) and rtsps:// (direct), plus
-                # the `-f v4l2` input flag our USB camera command always carries.
-                if b"rtsp://bblp:" in cmdline or b"rtsps://bblp:" in cmdline or b"v4l2" in cmdline:
+                # Match built-in Bambu RTSP or the explicit marker added to
+                # Bambuddy's external USB stream command. Never match V4L2 by
+                # itself: that could SIGKILL an unrelated ffmpeg workload.
+                if (
+                    b"rtsp://bblp:" in cmdline
+                    or b"rtsps://bblp:" in cmdline
+                    or external_usb_marker in cmdline
+                ):
                     pids.append(int(entry))
             except (OSError, PermissionError, ValueError):
                 continue

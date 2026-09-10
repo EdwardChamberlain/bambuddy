@@ -9,6 +9,7 @@ numeric target or pinned TLS proxy before they reach ffmpeg.
 """
 
 import asyncio
+import functools
 import ipaddress
 import logging
 import re
@@ -27,6 +28,15 @@ from backend.app.core.logging_filters import redact_url_credentials
 logger = logging.getLogger(__name__)
 
 CAMERA_URL_SCHEMES = ("http", "https", "rtsp", "rtsps")
+
+# This marker identifies ffmpeg processes launched for external USB streaming.
+# The orphan janitor must not treat every V4L2 ffmpeg on the host as ours.
+BAMBUDDY_USB_STREAM_MARKER = "bambuddy-external-usb-stream"
+
+# Concurrent one-shot callers must share one physical camera connection. This
+# applies to USB cameras in particular, but also avoids duplicate RTSP/MJPEG
+# requests when notification, detection, and finish-photo paths overlap.
+_inflight_captures: dict[tuple[str, str, str | None], asyncio.Task[bytes | None]] = {}
 
 
 def _redacted_error(error: BaseException) -> str:
@@ -313,6 +323,25 @@ def get_ffmpeg_path() -> str | None:
     return None
 
 
+def capture_in_flight(url: str, camera_type: str, snapshot_url: str | None = None) -> bool:
+    """Return whether a capture for this external-camera resource is running."""
+    task = _inflight_captures.get((url, camera_type, snapshot_url))
+    return task is not None and not task.done()
+
+
+def _capture_log_key(key: tuple[str, str, str | None]) -> str:
+    """Render a capture key without leaking credentials embedded in a URL."""
+    return redact_url_credentials(key[0])[:50] if key[0] else "None"
+
+
+def _discard_inflight_capture(key: tuple[str, str, str | None], task: asyncio.Task) -> None:
+    """Remove a completed task without evicting a newer task for the same key."""
+    if _inflight_captures.get(key) is task:
+        del _inflight_captures[key]
+    if not task.cancelled() and task.exception() is not None:
+        logger.debug("In-flight external-camera capture failed for %s", _capture_log_key(key))
+
+
 async def capture_frame(
     url: str,
     camera_type: str,
@@ -324,7 +353,8 @@ async def capture_frame(
     Args:
         url: Live-stream URL (MJPEG stream, RTSP URL, HTTP snapshot URL, or USB device path).
         camera_type: "mjpeg", "rtsp", "snapshot", or "usb".
-        timeout: Connection timeout in seconds.
+        timeout: Connection timeout in seconds. A follower's wait uses its own
+            timeout even when it joins an existing capture.
         snapshot_url: Optional override for single-frame capture. When set, fetched
             via plain HTTP GET regardless of `camera_type`. Bypasses MJPEG warm-up
             handling on sources that expose a dedicated frame endpoint (e.g. go2rtc's
@@ -334,26 +364,71 @@ async def capture_frame(
     Returns:
         JPEG bytes or None on failure
     """
-    if snapshot_url:
-        # Redact before truncating — slicing first can cut the URL short of the
-        # ``@`` the pattern anchors on and leave the password in the log.
-        logger.debug("capture_frame using snapshot override url=%s...", redact_url_credentials(snapshot_url)[:50])
-        return await _capture_snapshot(snapshot_url, timeout)
-    logger.debug(
-        "capture_frame called: type=%s, url=%s...",
-        camera_type,
-        redact_url_credentials(url)[:50] if url else "None",
-    )
-    if camera_type == "mjpeg":
-        return await _capture_mjpeg_frame(url, timeout)
-    elif camera_type == "rtsp":
-        return await _capture_rtsp_frame(url, timeout)
-    elif camera_type == "snapshot":
-        return await _capture_snapshot(url, timeout)
-    elif camera_type == "usb":
-        return await _capture_usb_frame(url, timeout)
+    key = (url, camera_type, snapshot_url)
+
+    # A follower that joined a failed capture gets one bounded retry of its own.
+    # Once the leader has finished, opening a replacement cannot compete with it.
+    for _ in range(2):
+        leader = _inflight_captures.get(key)
+        if leader is None or leader.done():
+            break
+        try:
+            frame = await asyncio.wait_for(asyncio.shield(leader), timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "Gave up waiting %ss on the in-flight external-camera capture for %s",
+                timeout,
+                _capture_log_key(key),
+            )
+            return None
+        except asyncio.CancelledError:
+            if not leader.cancelled():
+                raise
+            logger.info("In-flight external-camera capture was cancelled; retrying %s", _capture_log_key(key))
+            continue
+        if frame is not None:
+            logger.debug("Reusing in-flight external-camera capture for %s", _capture_log_key(key))
+            return frame
+        logger.debug("In-flight external-camera capture failed; retrying %s", _capture_log_key(key))
     else:
+        return None
+
+    task = asyncio.create_task(_capture_frame_uncoalesced(url, camera_type, timeout, snapshot_url))
+    _inflight_captures[key] = task
+    task.add_done_callback(functools.partial(_discard_inflight_capture, key))
+    # The leader owns the underlying capture and must outlive a cancelled
+    # request so followers can still receive the frame.
+    return await asyncio.shield(task)
+
+
+async def _capture_frame_uncoalesced(
+    url: str,
+    camera_type: str,
+    timeout: int,
+    snapshot_url: str | None,
+) -> bytes | None:
+    """Perform one external capture. Callers should use ``capture_frame``."""
+    try:
+        if snapshot_url:
+            logger.debug("capture_frame using snapshot override url=%s...", redact_url_credentials(snapshot_url)[:50])
+            return await _capture_snapshot(snapshot_url, timeout)
+        logger.debug(
+            "capture_frame called: type=%s, url=%s...",
+            camera_type,
+            redact_url_credentials(url)[:50] if url else "None",
+        )
+        if camera_type == "mjpeg":
+            return await _capture_mjpeg_frame(url, timeout)
+        if camera_type == "rtsp":
+            return await _capture_rtsp_frame(url, timeout)
+        if camera_type == "snapshot":
+            return await _capture_snapshot(url, timeout)
+        if camera_type == "usb":
+            return await _capture_usb_frame(url, timeout)
         logger.warning("Unknown camera type: %s", camera_type)
+        return None
+    except Exception as exc:  # noqa: BLE001 - shared callers must receive None
+        logger.warning("External camera capture failed: %s", _redacted_error(exc))
         return None
 
 
@@ -742,10 +817,9 @@ async def generate_mjpeg_stream(
         max_retries = 3
         for attempt in range(max_retries + 1):
             frame_yielded = False
-            async for _frame in _stream_rtsp(url, fps):
+            async for frame in _stream_rtsp(url, fps, on_process=on_process):
                 if stop_event is not None and stop_event.is_set():
                     return
-            async for frame in _stream_rtsp(url, fps, on_process=on_process):
                 frame_yielded = True
                 if on_frame is not None:
                     try:
@@ -1029,6 +1103,8 @@ async def _stream_usb(
         "5",
         "-r",
         str(fps),
+        "-metadata",
+        f"comment={BAMBUDDY_USB_STREAM_MARKER}",
         "-",
     ]
 

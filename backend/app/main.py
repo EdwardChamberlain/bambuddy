@@ -2145,13 +2145,18 @@ async def _capture_snapshot_for_notification(printer_id: int, printer, logger) -
         # Try external camera first
         if printer.external_camera_enabled and printer.external_camera_url:
             logger.info("[SNAPSHOT] Capturing from external camera for printer %s", printer_id)
+            from backend.app.api.routes.camera import live_frame_for_capture
             from backend.app.services.external_camera import capture_frame
 
-            frame_data = await capture_frame(
-                printer.external_camera_url,
-                printer.external_camera_type or "mjpeg",
-                snapshot_url=printer.external_camera_snapshot_url,
-            )
+            defer, buffered = live_frame_for_capture(printer_id)
+            if defer:
+                frame_data = buffered
+            else:
+                frame_data = await capture_frame(
+                    printer.external_camera_url,
+                    printer.external_camera_type or "mjpeg",
+                    snapshot_url=printer.external_camera_snapshot_url,
+                )
             if frame_data and len(frame_data) <= 2_500_000:
                 logger.info("[SNAPSHOT] External camera frame: %s bytes", len(frame_data))
                 return _apply_camera_rotation(frame_data, printer, logger)
@@ -3984,13 +3989,18 @@ async def on_finish_photo_moment(printer_id: int, data: dict):
         frame_bytes: bytes | None = None
 
         if printer.external_camera_enabled and printer.external_camera_url:
+            from backend.app.api.routes.camera import live_frame_for_capture
             from backend.app.services.external_camera import capture_frame
 
-            frame_bytes = await capture_frame(
-                printer.external_camera_url,
-                printer.external_camera_type or "mjpeg",
-                snapshot_url=printer.external_camera_snapshot_url,
-            )
+            defer, buffered = live_frame_for_capture(printer_id)
+            if defer:
+                frame_bytes = buffered
+            else:
+                frame_bytes = await capture_frame(
+                    printer.external_camera_url,
+                    printer.external_camera_type or "mjpeg",
+                    snapshot_url=printer.external_camera_snapshot_url,
+                )
             if frame_bytes:
                 logger.info(
                     "[FINISH-PHOTO-MOMENT] captured external-camera frame (%d bytes)",
@@ -5016,13 +5026,18 @@ async def on_print_complete(printer_id: int, data: dict):
                             if not photo_filename:
                                 if printer.external_camera_enabled and printer.external_camera_url:
                                     logger.info("[PHOTO-BG] Using external camera")
+                                    from backend.app.api.routes.camera import live_frame_for_capture
                                     from backend.app.services.external_camera import capture_frame
 
-                                    frame_data = await capture_frame(
-                                        printer.external_camera_url,
-                                        printer.external_camera_type or "mjpeg",
-                                        snapshot_url=printer.external_camera_snapshot_url,
-                                    )
+                                    defer, buffered = live_frame_for_capture(printer_id)
+                                    if defer:
+                                        frame_data = buffered
+                                    else:
+                                        frame_data = await capture_frame(
+                                            printer.external_camera_url,
+                                            printer.external_camera_type or "mjpeg",
+                                            snapshot_url=printer.external_camera_snapshot_url,
+                                        )
                                     if frame_data:
                                         photos_dir = archive_dir / "photos"
                                         photos_dir.mkdir(parents=True, exist_ok=True)

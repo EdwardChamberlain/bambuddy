@@ -86,8 +86,10 @@ async def test_stream_usb_registers_process_via_on_process(monkeypatch):
             return True
 
     proc = _UsbProc()
+    spawned_args: list[tuple[object, ...]] = []
 
     async def fake_create_subprocess_exec(*_args, **_kwargs):
+        spawned_args.append(_args)
         return proc
 
     monkeypatch.setattr(external_camera, "get_ffmpeg_path", lambda: "/fake/ffmpeg")
@@ -105,6 +107,7 @@ async def test_stream_usb_registers_process_via_on_process(monkeypatch):
             await stream.aclose()
 
     assert captured == [proc], "the spawned ffmpeg process must be handed to on_process"
+    assert external_camera.BAMBUDDY_USB_STREAM_MARKER in " ".join(map(str, spawned_args[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -184,16 +187,22 @@ async def test_cleanup_janitor_reaps_stale_external_usb_stream(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_scan_matches_v4l2_ffmpeg(monkeypatch):
-    cmdline = b"ffmpeg\x00-f\x00v4l2\x00-i\x00/dev/video0\x00-f\x00mjpeg\x00-\x00"
+def test_scan_matches_marked_bambuddy_usb_ffmpeg(monkeypatch):
+    cmdline = (
+        b"ffmpeg\x00-f\x00v4l2\x00-i\x00/dev/video0\x00-f\x00mjpeg\x00"
+        + b"-metadata\x00comment="
+        + external_camera.BAMBUDDY_USB_STREAM_MARKER.encode()
+        + b"\x00-\x00"
+    )
     monkeypatch.setattr("os.listdir", lambda _p: ["52020"])
     with patch("builtins.open", mock_open(read_data=cmdline)):
         assert 52020 in camera._scan_bambu_ffmpeg_pids()
 
 
-def test_scan_ignores_unrelated_ffmpeg(monkeypatch):
-    # A transcode of a local file is not ours — must not be reaped.
-    cmdline = b"ffmpeg\x00-i\x00/home/user/movie.mp4\x00out.mkv\x00"
+def test_scan_ignores_unrelated_v4l2_ffmpeg(monkeypatch):
+    # V4L2 alone is not ownership evidence: another application may use ffmpeg
+    # to record a USB camera in the same process namespace.
+    cmdline = b"ffmpeg\x00-f\x00v4l2\x00-i\x00/dev/video0\x00-f\x00mjpeg\x00-\x00"
     monkeypatch.setattr("os.listdir", lambda _p: ["52021"])
     with patch("builtins.open", mock_open(read_data=cmdline)):
         assert camera._scan_bambu_ffmpeg_pids() == []

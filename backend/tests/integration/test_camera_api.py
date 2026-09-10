@@ -376,6 +376,32 @@ class TestCameraAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_camera_snapshot_external_reuses_live_buffer(self, async_client: AsyncClient, printer_factory):
+        """An external snapshot must reuse a live stream's buffered frame."""
+        printer = await printer_factory(
+            external_camera_enabled=True,
+            external_camera_url="http://192.168.1.50/mjpeg",
+            external_camera_type="mjpeg",
+        )
+        fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+
+        with (
+            patch("backend.app.api.routes.camera._active_external_streams", {printer.id: 1}),
+            patch("backend.app.api.routes.camera._last_frames", {printer.id: fake_jpeg}),
+            patch(
+                "backend.app.services.external_camera.capture_frame",
+                new_callable=AsyncMock,
+                return_value=None,
+            ) as mock_capture,
+        ):
+            response = await async_client.get(f"/api/v1/printers/{printer.id}/camera/snapshot")
+
+        assert response.status_code == 200
+        assert response.content == fake_jpeg
+        mock_capture.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_camera_snapshot_external_camera_failure(self, async_client: AsyncClient, printer_factory):
         """Verify 503 when external camera capture fails."""
         printer = await printer_factory(

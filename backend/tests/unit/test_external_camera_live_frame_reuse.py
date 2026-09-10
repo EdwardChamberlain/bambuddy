@@ -18,6 +18,7 @@ that used to compete: layer timelapse, Obico polling, and plate detection.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -126,6 +127,31 @@ async def test_a_raising_on_frame_callback_cannot_break_the_stream():
         ]
 
     assert len(chunks) == 2, "stream stopped because the callback raised"
+
+
+async def test_rtsp_stream_yields_first_frame_from_registered_process():
+    """The registered RTSP generator must be the one consumed by the route."""
+    process = object()
+    registered: list[object] = []
+    never = asyncio.Event()
+
+    async def _fake_rtsp(_url, _fps, *, on_process=None):
+        if on_process is not None:
+            on_process(process)
+        yield FRESH_FRAME
+        await never.wait()
+
+    with patch.object(external_camera, "_stream_rtsp", _fake_rtsp):
+        stream = external_camera.generate_mjpeg_stream(
+            "rtsp://camera/stream",
+            "rtsp",
+            on_process=registered.append,
+        )
+        chunk = await asyncio.wait_for(anext(stream), timeout=1)
+        await stream.aclose()
+
+    assert registered == [process]
+    assert FRESH_FRAME in chunk
 
 
 # ---------------------------------------------------------------------------
