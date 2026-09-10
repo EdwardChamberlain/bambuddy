@@ -2289,6 +2289,35 @@ class TestFindThreemfByFilename:
         # Verify the execute was called (search was attempted with stripped name)
         assert db.execute.call_count == 2  # library + archive search
 
+    @pytest.mark.asyncio
+    async def test_generic_internal_storage_filename_uses_print_name(self):
+        """A known print name restores donor matching for Metadata/plate_N.gcode."""
+        from pathlib import Path
+
+        lib_file = MagicMock()
+        lib_file.file_path = "library/Cube.3mf"
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [lib_file]
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+
+        base_dir = MagicMock(spec=Path)
+        candidate = MagicMock(spec=Path)
+        candidate.exists.return_value = True
+        candidate.suffix = ".3mf"
+        base_dir.__truediv__ = MagicMock(return_value=candidate)
+
+        found = await _find_3mf_by_filename(
+            1,
+            "/data/Metadata/plate_1.gcode",
+            db,
+            base_dir,
+            print_name="Cube",
+        )
+
+        assert found == candidate
+
 
 class TestTrackFrom3mfWithPreresolvedPath:
     """Tests for _track_from_3mf() with threemf_path (no archive needed)."""

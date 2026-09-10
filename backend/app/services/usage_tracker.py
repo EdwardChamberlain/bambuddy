@@ -493,7 +493,21 @@ async def on_print_complete(
 
         search_filename = data.get("filename") or data.get("subtask_name") or (session.print_name if session else "")
         if search_filename:
-            threemf_path = await _find_3mf_by_filename(printer_id, search_filename, db, app_settings.base_dir)
+            donor_print_name = next(
+                (
+                    candidate
+                    for candidate in (data.get("subtask_name"), session.print_name if session else None)
+                    if _threemf_search_stem(candidate)
+                ),
+                None,
+            )
+            threemf_path = await _find_3mf_by_filename(
+                printer_id,
+                search_filename,
+                db,
+                app_settings.base_dir,
+                print_name=donor_print_name,
+            )
 
     if archive_id or threemf_path:
         threemf_results = await _track_from_3mf(
@@ -861,6 +875,7 @@ async def _find_3mf_by_filename(
     filename: str,
     db: AsyncSession,
     base_dir,
+    print_name: str | None = None,
 ):
     """Find a 3MF file by filename from library or previous archives.
 
@@ -872,7 +887,11 @@ async def _find_3mf_by_filename(
     from backend.app.models.archive import PrintArchive
     from backend.app.models.library import LibraryFile
 
-    search_base = _threemf_search_stem(filename)
+    # Firmware can report an internal-storage path such as
+    # ``Metadata/plate_1.gcode`` even when the original print name is known.
+    # Use that name as a second candidate so a generic plate filename does not
+    # discard a legitimate no-archive library/previous-archive donor.
+    search_base = _threemf_search_stem(filename, print_name)
     if not search_base:
         return None
 

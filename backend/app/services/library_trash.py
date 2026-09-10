@@ -391,37 +391,76 @@ class LibraryTrashService:
 
 
 async def release_queue_references(db: AsyncSession, file_ids: list[int]) -> int:
-    """Cancel waiting jobs and detach all other queue rows before deletion."""
+    """Cancel source-owned jobs and detach queue rows before deletion.
+
+    A ``preheating`` row owns a durable printer reservation and may already
+    have turned the heaters on, so it must go through the heat-soak abort path
+    rather than being treated as an ordinary waiting row.
+    """
     if not file_ids:
         return 0
     rows = (
         await db.execute(
-            select(PrintQueueItem.id, PrintQueueItem.library_file_id)
+            select(
+                PrintQueueItem.id,
+                PrintQueueItem.library_file_id,
+                PrintQueueItem.status,
+                PrintQueueItem.chamber_heat_soak,
+                PrintQueueItem.dispatch_subtask_id,
+            )
             .where(PrintQueueItem.library_file_id.in_(file_ids))
             .where(PrintQueueItem.archive_id.is_(None))
-            .where(PrintQueueItem.status.in_(("pending", "skipped")))
+            .where(
+                or_(
+                    PrintQueueItem.status.in_(("pending", "skipped", "preheating")),
+                    and_(
+                        PrintQueueItem.status == "dispatching",
+                        PrintQueueItem.chamber_heat_soak.is_(True),
+                        PrintQueueItem.dispatch_subtask_id.is_(None),
+                    ),
+                )
+            )
         )
     ).all()
     names = dict(
         (await db.execute(select(LibraryFile.id, LibraryFile.filename).where(LibraryFile.id.in_(file_ids)))).all()
     )
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    for item_id, library_file_id in rows:
-        await db.execute(
-            PrintQueueItem.__table__.update()
-            .where(PrintQueueItem.id == item_id)
-            .values(
+    cancelled = 0
+    reason_by_file = {
+        file_id: f"'{names.get(file_id, 'The library file')}' was deleted from the library" for file_id in file_ids
+    }
+
+    # A live heat-soak must be aborted through its service so heater shutdown,
+    # reservation cleanup, and queue status are persisted together.
+    from backend.app.services.chamber_heat_soak import abort_heat_soak, lock_queue_item
+
+    for item_id, _library_file_id, _status, _chamber_heat_soak, _dispatch_subtask_id in rows:
+        item = await lock_queue_item(db, item_id)
+        if not item or item.library_file_id not in file_ids or item.archive_id is not None:
+            continue
+        if item.status == "preheating" or (
+            item.status == "dispatching" and item.chamber_heat_soak and item.dispatch_subtask_id is None
+        ):
+            await abort_heat_soak(
+                db,
+                item,
+                reason_by_file.get(item.library_file_id, "The library file was deleted"),
                 status="cancelled",
-                completed_at=now,
-                error_message=f"'{names.get(library_file_id, 'The library file')}' was deleted from the library",
             )
-        )
+            cancelled += 1
+        elif item.status in ("pending", "skipped"):
+            item.status = "cancelled"
+            item.completed_at = now
+            item.error_message = reason_by_file.get(item.library_file_id, "The library file was deleted")
+            cancelled += 1
+
     await db.execute(
         PrintQueueItem.__table__.update()
         .where(PrintQueueItem.library_file_id.in_(file_ids))
         .values(library_file_id=None)
     )
-    return len(rows)
+    return cancelled
 
 
 library_trash_service = LibraryTrashService()

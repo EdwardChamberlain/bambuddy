@@ -24,6 +24,7 @@ from backend.app.models.smart_plug import SmartPlug
 from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
 from backend.app.services.bambu_ftp import (
+    UploadCancelled,
     cache_3mf_download,
     delete_file_async,
     ftps_handshake_cooloff_deadline,
@@ -2715,6 +2716,7 @@ class PrintScheduler:
         except Exception as e:
             logger.debug("Queue item %s: Delete failed (may not exist): %s", item.id, e)
 
+        upload_error: str | None = None
         try:
             if ftp_retry_enabled:
                 uploaded = await with_ftp_retry(
@@ -2741,6 +2743,13 @@ class PrintScheduler:
                     printer_model=printer.model,
                     respect_handshake_cooloff=False,
                 )
+        except UploadCancelled as e:
+            uploaded = False
+            upload_error = (
+                "Upload was too slow to finish and was cancelled. The printer's connection could not sustain "
+                "the transfer — check its Wi-Fi signal, or move it closer to the access point."
+            )
+            logger.error("Queue item %s: upload deadline exceeded: %s", item.id, e)
         except Exception as e:
             uploaded = False
             logger.error("Queue item %s: FTP error: %s (type: %s)", item.id, e, type(e).__name__)
@@ -2751,7 +2760,7 @@ class PrintScheduler:
 
         if not uploaded:
             cooloff_after = ftps_handshake_cooloff_deadline(printer.ip_address)
-            error_msg = (
+            error_msg = upload_error or (
                 "The printer's file service did not answer over TLS; the SD card is not involved."
                 if cooloff_after is not None and cooloff_after != cooloff_before
                 else (

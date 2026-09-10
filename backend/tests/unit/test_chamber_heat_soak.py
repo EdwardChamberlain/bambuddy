@@ -12,12 +12,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from backend.app.core.database import Base, _ensure_active_queue_printer_reservation
+from backend.app.models.library import LibraryFile
 from backend.app.models.print_queue import PrintQueueItem
 from backend.app.models.printer import Printer
 from backend.app.schemas.print_queue import PrintQueueItemCreate, PrintQueueItemUpdate
 from backend.app.services import chamber_heat_soak as heat
 from backend.app.services.bambu_mqtt import PrinterState
 from backend.app.services.heat_soak_telemetry import record_heat_soak_reports
+from backend.app.services.library_trash import release_queue_references
 
 
 @pytest.fixture
@@ -213,6 +215,34 @@ async def test_delete_offline_preserves_cleanup_and_prevents_new_soak_until_off_
     await soak.db.refresh(soak.printer)
     assert not soak.printer.heat_soak_shutdown_pending
     assert await soak.service.stage(soak.db, new_item)
+
+
+async def test_deleting_preheating_library_file_aborts_reservation_and_heaters(soak):
+    """Deleting a source file must not leave its preheating reservation alive."""
+    source = LibraryFile(
+        id=10,
+        filename="soak.3mf",
+        file_path="library/soak.3mf",
+        file_type="3mf",
+        file_size=1,
+        is_external=False,
+    )
+    soak.db.add(source)
+    soak.item.library_file_id = source.id
+    await soak.db.commit()
+
+    assert await soak.service.stage(soak.db, soak.item)
+    await soak.db.refresh(soak.item)
+    assert soak.item.status == "preheating"
+
+    assert await release_queue_references(soak.db, [source.id]) == 1
+    await soak.db.refresh(soak.item)
+    await soak.db.refresh(soak.printer)
+    assert soak.item.status == "cancelled"
+    assert soak.item.library_file_id is None
+    assert soak.item.preheat_owner is None
+    assert soak.printer.heat_soak_shutdown_pending
+    soak.client.set_bed_temperature.assert_called_with(0)
 
 
 async def test_cancel_at_timer_boundary_cannot_dispatch(soak):
