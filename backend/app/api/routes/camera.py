@@ -1787,11 +1787,7 @@ def _scan_bambu_ffmpeg_pids() -> list[int]:
                 # Match built-in Bambu RTSP or the explicit marker added to
                 # Bambuddy's external USB stream command. Never match V4L2 by
                 # itself: that could SIGKILL an unrelated ffmpeg workload.
-                if (
-                    b"rtsp://bblp:" in cmdline
-                    or b"rtsps://bblp:" in cmdline
-                    or external_usb_marker in cmdline
-                ):
+                if b"rtsp://bblp:" in cmdline or b"rtsps://bblp:" in cmdline or external_usb_marker in cmdline:
                     pids.append(int(entry))
             except (OSError, PermissionError, ValueError):
                 continue
