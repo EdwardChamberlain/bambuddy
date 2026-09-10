@@ -3431,8 +3431,8 @@ async def _run_slicer_with_fallback(
     from backend.app.api.routes.settings import get_setting
     from backend.app.services.preset_resolver import resolve_preset_ref
     from backend.app.services.slicer_api import (
-        SlicerApiServerError,
         SlicerApiOutputError,
+        SlicerApiServerError,
         SlicerApiService,
         SlicerApiUnavailableError,
         SlicerInputError,
