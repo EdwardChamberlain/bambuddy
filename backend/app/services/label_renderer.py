@@ -394,6 +394,12 @@ _SHEET_TEMPLATES: dict[str, tuple] = {
 }
 
 
+def get_sheet_capacity(template: TemplateName) -> int | None:
+    """Return the number of labels on a sheet template, or None for rolls."""
+    layout = _SHEET_TEMPLATES.get(template)
+    return layout[3] * layout[4] if layout else None
+
+
 def _render_single_label_pdf(template: TemplateName, data_list: list[LabelData]) -> bytes:
     w_mm, h_mm = _SINGLE_LABEL_SIZES_MM[template]
     page_w, page_h = w_mm * mm, h_mm * mm
@@ -410,7 +416,7 @@ def _render_single_label_pdf(template: TemplateName, data_list: list[LabelData])
     return buf.getvalue()
 
 
-def _render_sheet_pdf(template: TemplateName, data_list: list[LabelData]) -> bytes:
+def _render_sheet_pdf(template: TemplateName, data_list: list[LabelData], starting_position: int = 1) -> bytes:
     page_size, w_mm, h_mm, cols, rows, top_mm, left_mm, col_gap_mm, row_gap_mm = _SHEET_TEMPLATES[template]
     page_w, page_h = page_size
 
@@ -426,33 +432,44 @@ def _render_sheet_pdf(template: TemplateName, data_list: list[LabelData]) -> byt
     c.setTitle(f"Grove Control spool labels ({template})")
 
     per_page = cols * rows
-    for page_start in range(0, len(data_list), per_page):
-        chunk = data_list[page_start : page_start + per_page]
+    if starting_position < 1 or starting_position > per_page:
+        raise ValueError(f"Starting position must be between 1 and {per_page} for {template}")
+
+    data_index = 0
+    page_number = 0
+    while data_index < len(data_list):
+        slot_offset = starting_position - 1 if page_number == 0 else 0
+        chunk = data_list[data_index : data_index + per_page - slot_offset]
         for idx, data in enumerate(chunk):
-            row = idx // cols
-            col = idx % cols
+            slot_index = slot_offset + idx
+            row = slot_index // cols
+            col = slot_index % cols
             x = left_margin + col * (label_w + col_gap)
             y = page_h - top_margin - (row + 1) * label_h - row * row_gap
             _draw_label(c, x, y, label_w, label_h, data)
         c.showPage()
+        data_index += len(chunk)
+        page_number += 1
 
     c.save()
     return buf.getvalue()
 
 
-def render_labels(template: TemplateName, data_list: list[LabelData]) -> bytes:
+def render_labels(template: TemplateName, data_list: list[LabelData], *, starting_position: int = 1) -> bytes:
     """Render ``data_list`` to a PDF using the named template. Returns bytes.
 
     Empty ``data_list`` still produces a valid (empty) PDF — callers should
     short-circuit beforehand if that's not desired.
     """
     if template in _SINGLE_LABEL_SIZES_MM:
+        if starting_position != 1:
+            raise ValueError("Starting position is only supported for sheet label templates")
         return _render_single_label_pdf(template, data_list)
     if template in _SHEET_TEMPLATES:
-        return _render_sheet_pdf(template, data_list)
+        return _render_sheet_pdf(template, data_list, starting_position)
     raise ValueError(f"Unknown label template: {template!r}")
 
 
-__all__ = ["LabelData", "TemplateName", "render_labels"]
+__all__ = ["LabelData", "TemplateName", "get_sheet_capacity", "render_labels"]
 # white re-exported for completeness; future templates may need a paper-tone variant.
 _ = white
