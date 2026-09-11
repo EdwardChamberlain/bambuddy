@@ -70,6 +70,13 @@ _DISPATCH_REVIEW_MESSAGE = (
     "dispatch held for manual review to avoid a duplicate print."
 )
 
+# H2C tool-changer dock positions reported by ``device.nozzle.info``.  The
+# same payload contains hotends under ids 0/1; keeping the ids here means the
+# scheduler can recognise rack stock without depending on a printer-model
+# registry.
+_RACK_NOZZLE_IDS: frozenset[int] = frozenset(range(16, 22))
+_EMPTY_NOZZLE_SERIAL = "N/A"
+
 
 def _queue_status_from_dispatch_telemetry(printer_status, dispatch_subtask_id: str | None) -> str | None:
     """Map telemetry for this exact dispatch to its queue lifecycle state."""
@@ -87,6 +94,113 @@ def _queue_status_from_dispatch_telemetry(printer_status, dispatch_subtask_id: s
     if state == "FAILED":
         return "failed"
     return "dispatching"
+
+
+def _parse_nozzle_diameter(raw) -> float | None:
+    """Return a positive nozzle diameter, or ``None`` for unknown values."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _nozzle_info_by_id(status) -> dict[int, dict]:
+    """Index the H2 ``nozzle.info`` telemetry by its physical nozzle id."""
+    by_id: dict[int, dict] = {}
+    for entry in getattr(status, "nozzle_rack", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            by_id[int(entry.get("id"))] = entry
+        except (TypeError, ValueError):
+            continue
+    return by_id
+
+
+def _nozzle_is_mounted(entry: dict | None) -> bool:
+    """Conservatively determine whether an H2 hotend entry has a nozzle.
+
+    H2 firmware can retain the previous diameter after a hotend has parked its
+    nozzle.  Only the explicit ``serial_number=N/A`` plus a zero temperature
+    rating identifies that state; incomplete telemetry must remain fail-safe.
+    """
+    if entry is None:
+        return True
+    serial = str(entry.get("serial_number") or "").strip().upper()
+    if serial != _EMPTY_NOZZLE_SERIAL:
+        return True
+    try:
+        max_temp = float(entry.get("max_temp") or 0)
+    except (TypeError, ValueError):
+        return True
+    return max_temp > 0
+
+
+def _installed_nozzle_diameters(status) -> list[float]:
+    """Parse the mounted hotend diameters from a PrinterState (#1899).
+
+    Returns the diameters the printer actually reports (e.g. [0.4] single-nozzle,
+    [0.4, 0.6] dual-nozzle), skipping the empty-string defaults that populate a
+    NozzleInfo before MQTT fills it in. An empty list means "the printer hasn't
+    told us its nozzle hardware" — callers must treat that as unknown, not as a
+    mismatch, so we never block a print on missing data.
+    """
+    info = _nozzle_info_by_id(status)
+    diameters: list[float] = []
+    for index, nozzle in enumerate(getattr(status, "nozzles", None) or []):
+        raw = getattr(nozzle, "nozzle_diameter", "") or ""
+        value = _parse_nozzle_diameter(raw)
+        if value is not None and _nozzle_is_mounted(info.get(index)):
+            diameters.append(value)
+    return diameters
+
+
+def _rack_nozzle_diameters(status) -> list[float]:
+    """Return positive diameters currently parked in H2C rack slots."""
+    diameters: list[float] = []
+    for nozzle_id, entry in sorted(_nozzle_info_by_id(status).items()):
+        if nozzle_id not in _RACK_NOZZLE_IDS:
+            continue
+        value = _parse_nozzle_diameter(entry.get("diameter") or entry.get("nozzle_diameter"))
+        if value is not None:
+            diameters.append(value)
+    return diameters
+
+
+def _format_nozzle_diameters(diameters: list[float]) -> str:
+    """Format diameters once each, preserving telemetry order."""
+    return " / ".join(f"{d:g}mm" for d in dict.fromkeys(diameters))
+
+
+def _nozzle_mismatch_message(
+    sliced_nozzle: float | None,
+    installed: list[float],
+    rack: list[float] | None = None,
+) -> str | None:
+    """Return an actionable error message when the sliced nozzle can't be
+    printed on any installed nozzle, else None (#1899).
+
+    Fail-safe: returns None whenever we lack the data to judge — no sliced
+    diameter, or the printer reported no nozzles — so a print is only ever
+    blocked on a POSITIVE mismatch. On dual-nozzle printers a match against
+    EITHER installed nozzle passes (a 0.6 slice is fine if one hotend is 0.6).
+    The 0.05 tolerance absorbs float noise while staying well inside the 0.2
+    gap between adjacent nozzle sizes (0.2/0.4/0.6/0.8).
+    """
+    reachable = [*installed, *(rack or [])]
+    if not sliced_nozzle or not reachable:
+        return None
+    if any(abs(d - sliced_nozzle) < 0.05 for d in reachable):
+        return None
+    where = f"{_format_nozzle_diameters(installed)} installed" if installed else "no nozzle mounted"
+    if rack:
+        where += f" and {_format_nozzle_diameters(rack)} in the nozzle rack"
+    return (
+        f"File sliced for a {sliced_nozzle:g}mm nozzle, but the printer has "
+        f"{where}. Re-slice for an available nozzle, or fit the matching "
+        f"nozzle before printing."
+    )
 
 
 class PrintScheduler:
@@ -111,7 +225,6 @@ class PrintScheduler:
         self._check_interval = 30  # seconds
         self._power_on_wait_time = 180  # seconds to wait for printer after power on (3 min)
         self._power_on_check_interval = 10  # seconds between connection checks
-        self._min_drying_seconds = 1800  # 30 minutes minimum before humidity re-check can stop drying
         # Track which printers are currently auto-drying (printer_id -> start timestamp)
         self._drying_in_progress: dict[int, float] = {}
         # Recovery completion is deliberately asynchronous, so do not start a
@@ -1123,6 +1236,14 @@ class PrintScheduler:
             logger.warning("Cannot compute AMS mapping: printer %s status unavailable", printer_id)
             return None
 
+        # Filament Track Switch (FTS): when installed it routes any AMS slot to
+        # either extruder, so the per-nozzle hard filter below must NOT apply.
+        # Otherwise a print on one nozzle can't use a spool physically loaded in
+        # an AMS on the *other* nozzle, and the matcher falls through to a
+        # same-type wrong-colour spool on the target nozzle — the H2C + FTS
+        # wrong-filament bug (#2186). Mirrors the frontend skip added for #1162.
+        fts_installed = bool(getattr(getattr(status, "fila_switch", None), "installed", False))
+
         # Get filament requirements from source file
         filament_reqs = await self._get_filament_requirements(db, item)
         if not filament_reqs:
@@ -1207,6 +1328,7 @@ class PrintScheduler:
             prefer_lowest,
             inventory_remain_overrides,
             **match_kwargs,
+            fts_installed=fts_installed,
         )
 
     def _build_override_direct_mapping(self, overrides: list[dict], status) -> list[int] | None:
@@ -1233,12 +1355,14 @@ class PrintScheduler:
             }
             for o in overrides
         ]
+        fts_installed = bool(getattr(getattr(status, "fila_switch", None), "installed", False))
         return self._match_filaments_to_slots(
             reqs,
             loaded,
             strict_color_slot_ids={
                 o["slot_id"] for o in overrides if o.get("force_color_match") and isinstance(o.get("slot_id"), int)
             },
+            fts_installed=fts_installed,
         )
 
     async def _get_filament_requirements(self, db: AsyncSession, item: PrintQueueItem) -> list[dict] | None:
@@ -1522,6 +1646,7 @@ class PrintScheduler:
         prefer_lowest: bool = False,
         inventory_remain_overrides: dict[int, float] | None = None,
         strict_color_slot_ids: set[int] | None = None,
+        fts_installed: bool = False,
     ) -> list[int] | None:
         """Match required filaments to loaded filaments and build AMS mapping.
 
@@ -1565,8 +1690,11 @@ class PrintScheduler:
             # Nozzle-aware filtering: restrict to trays on the correct nozzle.
             # Hard filter — cross-nozzle assignment causes print failures
             # ("position of left hotend is abnormal"), so never fall back.
+            # Skipped when an FTS is installed: it routes any AMS slot to either
+            # extruder, so restricting to one nozzle would wrongly exclude the
+            # correct spool sitting in the other nozzle's AMS (#2186).
             req_nozzle_id = req.get("nozzle_id")
-            if req_nozzle_id is not None:
+            if req_nozzle_id is not None and not fts_installed:
                 available = [f for f in available if f.get("extruder_id") == req_nozzle_id]
 
             # Material is always a hard boundary. Disabling colour matching may
@@ -2101,33 +2229,29 @@ class PrintScheduler:
                             humidity = int(h_idx)
                         except (ValueError, TypeError):
                             pass
-                # Already drying — check if humidity dropped below threshold (with minimum drying time)
+                # Already drying — let it run to its configured duration (#1892).
+                #
+                # We deliberately do NOT stop drying from a humidity re-check here.
+                # Relative humidity drops steeply in heated air, so the AMS sensor
+                # reads ~15-20% within minutes of the dryer starting even while the
+                # filament is still saturated. A humidity-based early-stop therefore
+                # always fires at the minimum-time floor, truncating both user-started
+                # manual cycles and Bambuddy's own preset-duration dries to ~30 min.
+                # The firmware stops when the configured duration elapses; scheduling
+                # stops (print takes priority, queue no longer needs drying) are
+                # handled separately via _stop_drying().
                 if dry_time > 0:
                     if pid not in self._drying_in_progress:
-                        # Drying we didn't start (manual or from before restart) — track but don't stop
+                        # Drying we didn't start (manual or from before restart) —
+                        # track it so scheduling stops still apply; never auto-stop it.
                         self._drying_in_progress[pid] = time.monotonic()
-                    started_at = self._drying_in_progress[pid]
-                    elapsed = time.monotonic() - started_at
-                    if humidity is not None and humidity <= humidity_threshold and elapsed >= self._min_drying_seconds:
-                        logger.info(
-                            "Auto-drying: printer %d AMS %d — humidity %d%% <= threshold %d%% after %dm, stopping drying",
-                            pid,
-                            ams_id,
-                            humidity,
-                            humidity_threshold,
-                            int(elapsed / 60),
-                        )
-                        printer_manager.send_drying_command(pid, ams_id, temp=0, duration=0, mode=0)
-                    else:
-                        logger.debug(
-                            "Auto-drying: printer %d AMS %d — drying (%dm left, humidity %s%%, elapsed %dm/%dm min)",
-                            pid,
-                            ams_id,
-                            dry_time,
-                            humidity,
-                            int(elapsed / 60),
-                            self._min_drying_seconds // 60,
-                        )
+                    logger.debug(
+                        "Auto-drying: printer %d AMS %d — drying (%dm left, humidity %s%%), letting it run",
+                        pid,
+                        ams_id,
+                        dry_time,
+                        humidity,
+                    )
                     continue
 
                 # Humidity below threshold — no need to start drying
@@ -2649,6 +2773,43 @@ class PrintScheduler:
             logger.error("Queue item %s: File not found: %s", item.id, file_path)
             await self._power_off_if_needed(db, item)
             return
+
+        # Nozzle-diameter mismatch guard (#1899). A file sliced for one nozzle
+        # size dispatched to a printer with a different nozzle installed is
+        # rejected by the firmware with a cryptic HMS ("Failed to get AMS mapping
+        # table" 0700_8012, or "nozzle diameter … not consistent" 0500_4038) that
+        # gives the user no idea what went wrong. Catch it here, before we spend
+        # time preheating and uploading, and fail with an actionable message.
+        # Fail-safe by construction: only a POSITIVE mismatch blocks — when the
+        # slice carries no nozzle diameter (archive.nozzle_diameter is None) or
+        # the printer hasn't reported its nozzles yet, we fall through and let the
+        # print proceed exactly as before. On dual-nozzle printers (H2D) a match
+        # against EITHER installed nozzle passes, so a 0.6 slice is fine as long
+        # as one of the two hotends is a 0.6.
+        # H2C tool-changer rack positions are reachable too: the printer fetches
+        # a docked nozzle during dispatch, so they must be considered before the
+        # guard runs (the rack picker is not reached after a mismatch failure).
+        sliced_nozzle = archive.nozzle_diameter if archive else None
+        if sliced_nozzle:
+            nozzle_status = printer_manager.get_status(item.printer_id)
+            installed = _installed_nozzle_diameters(nozzle_status)
+            rack = _rack_nozzle_diameters(nozzle_status)
+            mismatch_msg = _nozzle_mismatch_message(sliced_nozzle, installed, rack)
+            if mismatch_msg:
+                item.status = "failed"
+                item.error_message = mismatch_msg
+                item.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                logger.warning("Queue item %s: nozzle mismatch — %s", item.id, mismatch_msg)
+                await notification_service.on_queue_job_failed(
+                    job_name=filename.replace(".gcode.3mf", "").replace(".3mf", ""),
+                    printer_id=printer.id,
+                    printer_name=printer.name,
+                    reason=mismatch_msg,
+                    db=db,
+                )
+                await self._power_off_if_needed(db, item)
+                return
 
         # G-code injection for auto-print systems (#422)
         injected_path = None
