@@ -441,7 +441,9 @@ export function LabelTemplatePickerModal({
               <div>{t('inventory.labels.startingPositionRange', 'Sheet labels: L7160 has 21 positions; 5160 has 30.')}</div>
               <div data-testid="label-starting-position-status" className={startingPositionIsValid ? '' : 'text-red-400'}>
                 {!startingPositionIsValid
-                  ? t('inventory.labels.startingPositionInvalid', 'Enter a whole number from 1 to 30.')
+                  ? t('inventory.labels.startingPositionInvalid', 'Enter a whole number from 1 to {{capacity}}.', {
+                      capacity: MAX_SHEET_CAPACITY,
+                    })
                   : startingPosition === 1
                     ? t('inventory.labels.startingPositionFirst', 'Printing starts at position 1.')
                     : t(

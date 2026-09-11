@@ -453,4 +453,20 @@ describe('LabelTemplatePickerModal', () => {
     expect(screen.getByTestId('print-labels-avery_l7160')).toBeDisabled();
     expect(screen.getByTestId('print-labels-avery_5160')).toBeEnabled();
   });
+
+  it('shows the maximum capacity for invalid starting positions', () => {
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '31' } });
+    expect(screen.getByTestId('label-starting-position-status')).toHaveTextContent('Enter a whole number from 1 to 30.');
+    expect(screen.getByTestId('label-starting-position-status')).not.toHaveTextContent('{{capacity}}');
+  });
 });
