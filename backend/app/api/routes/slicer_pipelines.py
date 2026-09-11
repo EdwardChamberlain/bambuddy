@@ -151,6 +151,22 @@ async def update_pipeline(
     if data.bed_type is not None:
         row.bed_type = data.bed_type
 
+    # PR B target binding. The schema accepts ``target_kind=specific_printer``
+    # without ``target_printer_id`` (operator may be saving the kind first),
+    # but a 'specific_printer' kind with a printer_id of 0 is rejected since
+    # printer ids are always positive — guard against the JSON-coerced
+    # empty-string case from the frontend.
+    if data.target_kind is not None:
+        row.target_kind = data.target_kind
+    if data.target_printer_id is not None:
+        # ``target_printer_id=0`` from the frontend means "clear the target"
+        # (the <option value=""> case). Anything positive must reference an
+        # actual printer row.
+        if data.target_printer_id == 0:
+            row.target_printer_id = None
+        else:
+            row.target_printer_id = data.target_printer_id
+
     await db.commit()
     await db.refresh(row)
     return _to_response(row)

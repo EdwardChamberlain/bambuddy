@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Check, Edit2, Loader2, Trash2, Workflow, X } from 'lucide-react';
+import { AlertTriangle, Check, Edit2, Loader2, Printer as PrinterIcon, Trash2, Workflow, X } from 'lucide-react';
 import {
   api,
+  type PipelineRun,
   type PresetRef,
   type PresetSource,
+  type Printer as PrinterType,
   type SlicerPipeline,
   type UnifiedPresetsResponse,
 } from '../api/client';
@@ -47,9 +49,27 @@ export function SlicerPipelinesPanel() {
     queryFn: () => api.getSlicerPresets(),
   });
 
+  // Printers list for the target picker (PR B).
+  const { data: printers } = useQuery({
+    queryKey: ['printers'],
+    queryFn: () => api.getPrinters(),
+  });
+
   const updateMutation = useMutation({
-    mutationFn: ({ id, name, description }: { id: number; name?: string; description?: string | null }) =>
-      api.updateSlicerPipeline(id, { name, description }),
+    mutationFn: ({
+      id,
+      name,
+      description,
+      target_printer_id,
+      target_kind,
+    }: {
+      id: number;
+      name?: string;
+      description?: string | null;
+      target_printer_id?: number | null;
+      target_kind?: 'specific_printer' | 'printer_class';
+    }) =>
+      api.updateSlicerPipeline(id, { name, description, target_printer_id, target_kind }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['slicer-pipelines'] });
       showToast(t('settings.pipelines.toast.saved', 'Pipeline saved'), 'success');
@@ -116,7 +136,8 @@ export function SlicerPipelinesPanel() {
                 key={p.id}
                 pipeline={p}
                 presets={presets}
-                onRename={(name, description) => updateMutation.mutate({ id: p.id, name, description })}
+                printers={printers ?? []}
+                onSave={(payload) => updateMutation.mutate({ id: p.id, ...payload })}
                 onDelete={() => {
                   if (confirm(t('settings.pipelines.confirmDelete', 'Delete this pipeline? This cannot be undone.'))) {
                     deleteMutation.mutate(p.id);
@@ -136,14 +157,21 @@ export function SlicerPipelinesPanel() {
 function PipelineRow({
   pipeline,
   presets,
-  onRename,
+  printers,
+  onSave,
   onDelete,
   saving,
   deleting,
 }: {
   pipeline: SlicerPipeline;
   presets: UnifiedPresetsResponse | undefined;
-  onRename: (name: string, description: string | null) => void;
+  printers: PrinterType[];
+  onSave: (payload: {
+    name?: string;
+    description?: string | null;
+    target_printer_id?: number | null;
+    target_kind?: 'specific_printer' | 'printer_class';
+  }) => void;
   onDelete: () => void;
   saving: boolean;
   deleting: boolean;
@@ -152,6 +180,19 @@ function PipelineRow({
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(pipeline.name);
   const [draftDescription, setDraftDescription] = useState(pipeline.description ?? '');
+  const [draftTargetPrinterId, setDraftTargetPrinterId] = useState<number | null>(
+    pipeline.target_printer_id,
+  );
+
+  // Recent runs for the inline last-run summary. ``enabled: editing === false``
+  // avoids re-querying every keystroke while the editor is open.
+  const { data: runsList } = useQuery({
+    queryKey: ['pipeline-runs', pipeline.id],
+    queryFn: () => api.listPipelineRuns(pipeline.id, 1),
+    enabled: !editing,
+    refetchInterval: 15_000,
+  });
+  const lastRun: PipelineRun | undefined = runsList?.runs?.[0];
 
   const printerName = resolveName(presets, 'printer', pipeline.printer_preset);
   const processName = resolveName(presets, 'process', pipeline.process_preset);
@@ -159,17 +200,28 @@ function PipelineRow({
   const hasStaleRef =
     presets !== undefined &&
     (printerName === null || processName === null || filamentResolutions.some((n) => n === null));
+  const targetPrinter = pipeline.target_printer_id
+    ? printers.find((p) => p.id === pipeline.target_printer_id)
+    : undefined;
+  const needsTarget = pipeline.target_printer_id === null;
 
   const handleSave = () => {
     const trimmedName = draftName.trim();
     if (!trimmedName) return;
-    onRename(trimmedName, draftDescription.trim() || null);
+    onSave({
+      name: trimmedName,
+      description: draftDescription.trim() || null,
+      target_kind: 'specific_printer',
+      // Backend treats 0 as "clear"; null in TS maps to that intent.
+      target_printer_id: draftTargetPrinterId ?? 0,
+    });
     setEditing(false);
   };
 
   const handleCancel = () => {
     setDraftName(pipeline.name);
     setDraftDescription(pipeline.description ?? '');
+    setDraftTargetPrinterId(pipeline.target_printer_id);
     setEditing(false);
   };
 
@@ -194,6 +246,28 @@ function PipelineRow({
                 rows={2}
                 className="w-full px-2 py-1 text-xs bg-bambu-dark border border-bambu-dark-tertiary rounded text-white"
               />
+              <div>
+                <label className="text-xs text-bambu-gray block mb-1">
+                  {t('settings.pipelines.field.targetPrinter', 'Target printer')}
+                </label>
+                <select
+                  value={draftTargetPrinterId ?? ''}
+                  onChange={(e) =>
+                    setDraftTargetPrinterId(e.target.value ? parseInt(e.target.value, 10) : null)
+                  }
+                  aria-label={t('settings.pipelines.field.targetPrinter', 'Target printer')}
+                  className="w-full px-2 py-1 text-xs bg-bambu-dark border border-bambu-dark-tertiary rounded text-white"
+                >
+                  <option value="">
+                    {t('settings.pipelines.field.noTarget', '— No target —')}
+                  </option>
+                  {printers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           ) : (
             <>
@@ -277,6 +351,43 @@ function PipelineRow({
               <span className="text-white">{pipeline.bed_type}</span>
             </div>
           )}
+          <div className="text-bambu-gray flex items-center gap-1">
+            <PrinterIcon className="w-3 h-3" />
+            <span className="font-medium text-bambu-gray/80">
+              {t('settings.pipelines.field.targetPrinter', 'Target printer')}:
+            </span>{' '}
+            {targetPrinter ? (
+              <span className="text-white">{targetPrinter.name}</span>
+            ) : (
+              <span className="text-amber-400">
+                {t('settings.pipelines.noTargetHint', 'Set a target printer to run this')}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {!editing && lastRun && (
+        <div className="mt-1.5 text-xs text-bambu-gray flex items-center gap-1">
+          <span className="font-medium text-bambu-gray/80">
+            {t('settings.pipelines.runs.lastRun', 'Last run')}:
+          </span>{' '}
+          <RunStatusBadge status={lastRun.status} />
+          {lastRun.created_at && (
+            <span className="text-bambu-gray/60">
+              · {new Date(lastRun.created_at).toLocaleString()}
+            </span>
+          )}
+        </div>
+      )}
+
+      {needsTarget && !editing && (
+        <div className="mt-2 flex items-center gap-1.5 text-xs text-amber-400">
+          <AlertTriangle className="w-3.5 h-3.5" />
+          {t(
+            'settings.pipelines.noTargetWarning',
+            'Set a target printer before running this pipeline.',
+          )}
         </div>
       )}
 
@@ -290,6 +401,24 @@ function PipelineRow({
         </div>
       )}
     </div>
+  );
+}
+
+function RunStatusBadge({ status }: { status: PipelineRun['status'] }) {
+  const { t } = useTranslation();
+  const colourClass: Record<PipelineRun['status'], string> = {
+    queued: 'text-bambu-gray',
+    slicing: 'text-blue-400',
+    dispatching: 'text-blue-400',
+    in_progress: 'text-bambu-green',
+    completed: 'text-bambu-green',
+    failed: 'text-red-400',
+    cancelled: 'text-bambu-gray',
+  };
+  return (
+    <span className={colourClass[status]}>
+      {t(`settings.pipelines.runs.status.${status}`, status)}
+    </span>
   );
 }
 
