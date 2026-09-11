@@ -306,6 +306,37 @@ async def test_connection_error_raises_unavailable():
         await fetch_icon("https://example.com/icon")
 
 
+@pytest.mark.asyncio
+async def test_connect_time_ssrf_rejection_raises_url_error():
+    """A transport policy rejection must become the API's 400-shaped error."""
+
+    class _PolicyRejectingClient:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        def stream(self, *_a, **_kw):
+            class _Ctx:
+                async def __aenter__(_self):
+                    raise ValueError("icon URL must point to a globally routable address")
+
+                async def __aexit__(_self, *_exc):
+                    return False
+
+            return _Ctx()
+
+    with (
+        patch("backend.app.services.oidc_icon.httpx.AsyncClient", _PolicyRejectingClient),
+        pytest.raises(OIDCIconUrlError, match="globally routable"),
+    ):
+        await fetch_icon("https://example.com/icon")
+
+
 # ─── C1: httpx.InvalidURL → OIDCIconUrlError (not a 500) ─────────────────
 
 

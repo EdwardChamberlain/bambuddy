@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "Pré-aquecimento da câmara",
+    temperature: "Temperatura alvo (°C)",
+    duration: "Duração (minutos)",
+    status: "Pré-aquecendo",
+    hint: "30–60°C, 1–120 minutos. O temporizador começa quando o comando de aquecimento é enviado.",
+    bedOnly: "!! Aquecedor de câmara indisponível nesta máquina. O aquecimento será feito somente pela mesa.",
+    remaining: 'Restante: {{time}}',
+    waitingForConfirmation: 'Aguardando confirmação do aquecedor',
+    skip: 'Pular o aquecimento da câmara',
+    skipped: 'Aquecimento da câmara ignorado',
+    skipFailed: 'Não foi possível ignorar o aquecimento da câmara',
+  },
   // Navigation
   nav: {
     printers: 'Impressoras',
@@ -2053,6 +2066,8 @@ export default {
     slicerCard: 'Fatiador',
     orcaslicerApiUrl: 'OrcaSlicer sidecar URL',
     bambuStudioApiUrl: 'Bambu Studio sidecar URL',
+    slicerStallTimeout: 'Tempo limite de inatividade do fatiador (minutos)',
+    slicerStallTimeoutDescription: 'Desiste de um fatiamento apos esse tempo sem progresso do sidecar. Modelos pesados que continuam relatando progresso nunca sao interrompidos, por mais que demorem. Sidecars que nao relatam progresso usam este valor como limite de tempo total.',
     slicerApiUrlDescription: 'URL do contêiner sidecar slicer-API. Deixe em branco para usar SLICER_API_URL / BAMBU_STUDIO_API_URL.',
     slicerBundlesRemoved: {
       title: 'Bundles do fatiador (removido)',

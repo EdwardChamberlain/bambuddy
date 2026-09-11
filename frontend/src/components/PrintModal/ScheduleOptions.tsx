@@ -11,7 +11,7 @@ import {
   type DateFormat,
 } from '../../utils/date';
 
-type ToggleKey = Exclude<keyof ScheduleOptions, 'scheduledTime'>;
+type ToggleKey = Exclude<keyof ScheduleOptions, 'scheduledTime' | 'heatSoakTemperature' | 'heatSoakMinutes'>;
 
 /** Collapsible queue controls, including an optional do-not-start-before time. */
 export function ScheduleOptionsPanel({
@@ -22,6 +22,7 @@ export function ScheduleOptionsPanel({
   canInsertAtTop = false,
   showAutoOff = false,
   hasGcodeSnippets = false,
+  hasChamberHeater = false,
 }: ScheduleOptionsProps) {
   const { t, i18n } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
@@ -43,6 +44,7 @@ export function ScheduleOptionsPanel({
     ...(canInsertAtTop ? [{ key: 'insertAtTop' as const, label: t('printModal.insertAtTop', 'Insert at top of queue') }] : []),
     { key: 'requireManualStart', label: t('printModal.requireManualStart') },
     { key: 'requirePreviousSuccess', label: t('printModal.requirePreviousSuccess') },
+    { key: 'chamberHeatSoak', label: t('heatSoak.option') },
     { key: 'waitForDryingComplete', label: t('printModal.waitForDryingComplete') },
     ...(showAutoOff ? [{ key: 'autoOffAfter' as const, label: t('printModal.autoOffAfter'), disabled: !canControlPrinter }] : []),
     ...(hasGcodeSnippets ? [{ key: 'gcodeInjection' as const, label: t('printModal.gcodeInjection', 'Inject auto-print G-code') }] : []),
@@ -178,22 +180,51 @@ export function ScheduleOptionsPanel({
 
   return (
     <div className="mb-4">
-      <button type="button" onClick={() => setIsExpanded(!isExpanded)} className="flex w-full items-center gap-2 text-sm text-bambu-gray transition-colors hover:text-white">
+      <button type="button" onClick={() => setIsExpanded(!isExpanded)} aria-expanded={isExpanded} className="flex w-full items-center gap-2 text-sm text-bambu-gray transition-colors hover:text-white">
         <ListOrdered className="w-4 h-4" />
         <span>{t('printModal.queueOptions', 'Queue options')}</span>
         {isExpanded ? <ChevronUp className="ml-auto w-4 h-4" /> : <ChevronDown className="ml-auto w-4 h-4" />}
       </button>
       {isExpanded && (
         <div className="mt-2 space-y-3 rounded-lg bg-bambu-dark p-3">
-          {controls.map(({ key, label, disabled }) => (
-            <label key={key} className={`flex items-center justify-between ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`}>
-              <span className="text-sm text-white">{label}</span>
-              <input type="checkbox" checked={options[key]} onChange={() => !disabled && onChange({ ...options, [key]: !options[key] })} disabled={disabled} className="peer sr-only" />
-              <div className={`relative h-5 w-10 rounded-full transition-colors ${options[key] ? 'bg-bambu-green' : 'bg-bambu-dark-tertiary'}`}>
-                <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${options[key] ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          {controls.map(({ key, label, disabled }) => {
+            const toggle = (
+              <label key={key} className={`flex items-center justify-between ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`}>
+                <span className="text-sm text-white">{label}</span>
+                <input type="checkbox" checked={options[key]} onChange={() => !disabled && onChange({ ...options, [key]: !options[key] })} disabled={disabled} className="peer sr-only" />
+                <div className={`relative h-5 w-10 rounded-full transition-colors ${options[key] ? 'bg-bambu-green' : 'bg-bambu-dark-tertiary'}`}>
+                  <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${options[key] ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                </div>
+              </label>
+            );
+
+            if (key !== 'chamberHeatSoak') return toggle;
+            return (
+              <div key={key} className={options.chamberHeatSoak ? 'space-y-2' : undefined}>
+                {toggle}
+                {options.chamberHeatSoak && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="text-sm text-bambu-gray">
+                        {t('heatSoak.temperature')}
+                        <input type="number" min={30} max={60} step={1} value={Number.isNaN(options.heatSoakTemperature) ? '' : options.heatSoakTemperature}
+                          onChange={(event) => onChange({ ...options, heatSoakTemperature: event.target.valueAsNumber })}
+                          className="mt-1 w-full rounded-lg border border-bambu-dark-tertiary bg-bambu-dark px-3 py-2 text-white" />
+                      </label>
+                      <label className="text-sm text-bambu-gray">
+                        {t('heatSoak.duration')}
+                        <input type="number" min={1} max={120} step={1} value={Number.isNaN(options.heatSoakMinutes) ? '' : options.heatSoakMinutes}
+                          onChange={(event) => onChange({ ...options, heatSoakMinutes: event.target.valueAsNumber })}
+                          className="mt-1 w-full rounded-lg border border-bambu-dark-tertiary bg-bambu-dark px-3 py-2 text-white" />
+                      </label>
+                    </div>
+                    <p className="text-xs text-bambu-gray">{t('heatSoak.hint')}</p>
+                    {!hasChamberHeater && <p className="text-xs text-amber-300">{t('heatSoak.bedOnly')}</p>}
+                  </div>
+                )}
               </div>
-            </label>
-          ))}
+            );
+          })}
 
           {options.postponePrint && (
             <div>

@@ -23,12 +23,54 @@ def _set_sqlite_pragmas(dbapi_conn, connection_record):
     cursor.close()
 
 
+# Resolved connection-pool configuration, captured at engine creation so
+# /system/db-pool can report it without re-deriving the dialect defaults.
+_pool_config: dict = {}
+
+
+def _resolve_pool_kwargs() -> dict:
+    """Build the pool kwargs for ``create_async_engine`` (issue #2572).
+
+    Dialect-aware defaults, each overridable via env (``DB_POOL_SIZE`` etc.):
+      - PostgreSQL: pool_size 20 + max_overflow 80, ``pool_pre_ping`` (recover
+        server-dropped connections instead of erroring the request) and
+        ``pool_recycle`` 1800s. The old hard-coded 10 + 20 exhausted on large
+        farms while printer callbacks held connections.
+      - SQLite: pool_size 20 + max_overflow 200 (unchanged); no pre-ping /
+        recycle — the connection is a local file, not a server socket.
+    """
+    if is_sqlite():
+        pool_size = settings.db_pool_size if settings.db_pool_size is not None else 20
+        max_overflow = settings.db_max_overflow if settings.db_max_overflow is not None else 200
+        kwargs = {"pool_size": pool_size, "max_overflow": max_overflow}
+    else:
+        pool_size = settings.db_pool_size if settings.db_pool_size is not None else 20
+        max_overflow = settings.db_max_overflow if settings.db_max_overflow is not None else 80
+        kwargs = {
+            "pool_size": pool_size,
+            "max_overflow": max_overflow,
+            "pool_pre_ping": True,
+            "pool_recycle": settings.db_pool_recycle if settings.db_pool_recycle is not None else 1800,
+        }
+    if settings.db_pool_timeout is not None:
+        kwargs["pool_timeout"] = settings.db_pool_timeout
+    return kwargs
+
+
 def _create_engine():
     """Create the async engine with dialect-appropriate settings."""
-    if is_sqlite():
-        kwargs = {"pool_size": 20, "max_overflow": 200}
-    else:
-        kwargs = {"pool_size": 10, "max_overflow": 20}
+    kwargs = _resolve_pool_kwargs()
+
+    global _pool_config
+    _pool_config = {
+        "pool_size": kwargs["pool_size"],
+        "max_overflow": kwargs["max_overflow"],
+        # SQLAlchemy's own defaults when we don't pass the kwarg.
+        "pool_timeout": kwargs.get("pool_timeout", 30),
+        "pool_recycle": kwargs.get("pool_recycle", -1),
+        "pool_pre_ping": kwargs.get("pool_pre_ping", False),
+    }
+
     eng = create_async_engine(
         settings.database_url,
         echo=settings.debug,
@@ -77,6 +119,36 @@ async_session = async_sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+
+def get_pool_status() -> dict:
+    """Snapshot the DB connection pool for diagnostics (issue #2572).
+
+    Returns the resolved configuration plus live gauges (checked-out /
+    checked-in / overflow). Reads the pool's own counters — it does NOT
+    check out a connection, so it stays truthful even when the pool is
+    exhausted. Gauges a given pool implementation doesn't expose come back
+    as ``None`` rather than raising.
+    """
+    pool = engine.sync_engine.pool
+    gauges: dict = {}
+    for key, method_name in (
+        ("current_size", "size"),
+        ("checked_out", "checkedout"),
+        ("checked_in", "checkedin"),
+        ("overflow", "overflow"),
+    ):
+        method = getattr(pool, method_name, None)
+        try:
+            gauges[key] = method() if callable(method) else None
+        except Exception:
+            # A gauge should never take down the diagnostics endpoint.
+            gauges[key] = None
+    return {
+        "dialect": "sqlite" if is_sqlite() else "postgresql",
+        "config": dict(_pool_config),
+        **gauges,
+    }
 
 
 async def run_with_retry(fn, *, max_attempts: int = 3, label: str = ""):
@@ -372,6 +444,32 @@ async def _migrate_encrypt_legacy_secrets() -> None:
         )
 
 
+_PG_ALREADY_APPLIED = frozenset({"42701", "42P07", "42710", "23505"})
+_PG_UNDEFINED_COLUMN = "42703"
+
+
+def _sqlstate(exc) -> str | None:
+    """Return a PostgreSQL SQLSTATE when the driver exposes one."""
+    original = getattr(exc, "orig", None)
+    for attr in ("sqlstate", "pgcode"):
+        value = getattr(original, attr, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _is_already_applied(exc, sql: str) -> bool:
+    """Classify idempotent DDL by SQLSTATE, with SQLite text fallback."""
+    is_rename = "rename column" in sql.lower()
+    state = _sqlstate(exc)
+    if state is not None:
+        return state in _PG_ALREADY_APPLIED or (state == _PG_UNDEFINED_COLUMN and is_rename)
+    message = str(exc).lower()
+    return any(
+        key in message for key in ("already exists", "duplicate key", "duplicate column name", "no such column")
+    ) or (is_rename and "column" in message and "does not exist" in message)
+
+
 async def _safe_execute(conn, sql):
     """Execute a DDL migration statement, silently ignoring idempotency errors.
 
@@ -399,14 +497,7 @@ async def _safe_execute(conn, sql):
         async with conn.begin_nested():
             await conn.execute(text(sql))
     except (OperationalError, ProgrammingError) as exc:
-        msg = str(exc).lower()
-        # Only swallow "column … does not exist" for RENAME COLUMN — not for ADD COLUMN
-        # or CREATE INDEX where it would indicate schema corruption, not idempotency.
-        column_not_exists = "rename column" in sql.lower() and "column" in msg and "does not exist" in msg
-        if (
-            not any(k in msg for k in ("already exists", "duplicate key", "duplicate column name", "no such column"))
-            and not column_not_exists
-        ):
+        if not _is_already_applied(exc, sql):
             logger.error("Migration statement failed: %s | SQL: %.200s", exc, sql)
             raise
 
@@ -432,6 +523,13 @@ _QUEUE_INSERT_COLUMN_DEFINITIONS: dict[str, tuple[str, str]] = {
     "position": ("INTEGER DEFAULT 0", "INTEGER DEFAULT 0"),
     "scheduled_time": ("DATETIME", "TIMESTAMP"),
     "manual_start": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
+    "chamber_heat_soak": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
+    "heat_soak_temperature": ("INTEGER DEFAULT 60", "INTEGER DEFAULT 60"),
+    "heat_soak_minutes": ("INTEGER DEFAULT 30", "INTEGER DEFAULT 30"),
+    "preheat_owner": ("VARCHAR(36)", "VARCHAR(36)"),
+    "preheat_requested_at": ("DATETIME", "TIMESTAMP"),
+    "preheat_checked_at": ("DATETIME", "TIMESTAMP"),
+    "preheat_started_at": ("DATETIME", "TIMESTAMP"),
     "wait_for_drying_complete": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     "require_previous_success": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     "auto_off_after": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
@@ -813,11 +911,11 @@ async def _ensure_active_queue_printer_reservation(conn) -> None:
                 "WITH ranked_active_queue AS ("
                 " SELECT id, ROW_NUMBER() OVER ("
                 "   PARTITION BY printer_id"
-                "   ORDER BY CASE status WHEN 'printing' THEN 0 ELSE 1 END,"
+                "   ORDER BY CASE status WHEN 'printing' THEN 0 WHEN 'dispatching' THEN 1 ELSE 2 END,"
                 "            COALESCE(started_at, dispatched_at, created_at) DESC, id DESC"
                 " ) AS reservation_rank"
                 " FROM print_queue"
-                " WHERE printer_id IS NOT NULL AND status IN ('dispatching', 'printing')"
+                " WHERE printer_id IS NOT NULL AND status IN ('preheating', 'dispatching', 'printing')"
                 ")"
                 " UPDATE print_queue"
                 " SET status = 'failed', dispatched_at = NULL, started_at = NULL,"
@@ -830,11 +928,12 @@ async def _ensure_active_queue_printer_reservation(conn) -> None:
     if isinstance(recovered_count, int) and recovered_count > 0:
         logger.warning("Recovered %d duplicate active print_queue reservation(s)", recovered_count)
 
+    # A new name upgrades the old predicate without dropping the existing guard.
     await _safe_execute(
         conn,
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_print_queue_active_printer "
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_print_queue_active_printer_heat_soak "
         "ON print_queue (printer_id) "
-        "WHERE printer_id IS NOT NULL AND status IN ('dispatching', 'printing')",
+        "WHERE printer_id IS NOT NULL AND status IN ('preheating', 'dispatching', 'printing')",
     )
 
 
@@ -1118,6 +1217,25 @@ async def run_migrations(conn):
         await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN dispatched_at TIMESTAMP")
 
     await _safe_execute(conn, "ALTER TABLE print_queue ADD COLUMN dispatch_subtask_id VARCHAR(32)")
+
+    for column in (
+        "chamber_heat_soak",
+        "heat_soak_temperature",
+        "heat_soak_minutes",
+        "preheat_owner",
+        "preheat_requested_at",
+        "preheat_checked_at",
+        "preheat_started_at",
+    ):
+        sql_type = _QUEUE_INSERT_COLUMN_DEFINITIONS[column][0 if is_sqlite() else 1]
+        await _safe_execute(conn, f"ALTER TABLE print_queue ADD COLUMN {column} {sql_type}")
+    boolean_default = "0" if is_sqlite() else "false"
+    await _safe_execute(
+        conn, f"ALTER TABLE printers ADD COLUMN heat_soak_shutdown_pending BOOLEAN DEFAULT {boolean_default}"
+    )
+
+    timestamp_type = "DATETIME" if is_sqlite() else "TIMESTAMP"
+    await _safe_execute(conn, f"ALTER TABLE printers ADD COLUMN heat_soak_shutdown_at {timestamp_type}")
 
     await _ensure_active_queue_printer_reservation(conn)
 
@@ -2601,17 +2719,15 @@ async def run_migrations(conn):
     # SQLite does not support ALTER TABLE ADD CONSTRAINT — handled by __table_args__ at creation.
     # Runs AFTER the backfill so Fall B rows don't fail constraint validation.
     if not is_sqlite():
+        constraint_sql = (
+            "ALTER TABLE oidc_providers ADD CONSTRAINT ck_auto_link_requires_verified_email_claim "
+            "CHECK (auto_link_existing_accounts = FALSE OR email_claim != 'email' OR require_email_verified = TRUE)"
+        )
         try:
             async with conn.begin_nested():
-                await conn.execute(
-                    text(
-                        "ALTER TABLE oidc_providers ADD CONSTRAINT ck_auto_link_requires_verified_email_claim "
-                        "CHECK (auto_link_existing_accounts = FALSE OR email_claim != 'email' OR require_email_verified = TRUE)"
-                    )
-                )
+                await conn.execute(text(constraint_sql))
         except (OperationalError, ProgrammingError) as exc:
-            msg = str(exc).lower()
-            if "already exists" not in msg:
+            if not _is_already_applied(exc, constraint_sql):
                 logger.error(
                     "Security constraint migration FAILED — auto_link safety constraint may not be enforced: %s",
                     exc,

@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "챔버 예열",
+    temperature: "목표 온도 (°C)",
+    duration: "유지 시간(분)",
+    status: "예열 중",
+    hint: "30–60°C, 1–120분. 가열 명령을 보내면 타이머가 시작됩니다.",
+    bedOnly: "!! 이 장비에는 챔버 히터가 없습니다. 베드만 사용하여 가열합니다.",
+    remaining: '남은 시간: {{time}}',
+    waitingForConfirmation: '히터 확인을 기다리는 중',
+    skip: '챔버 예열 건너뛰기',
+    skipped: '챔버 예열을 건너뛰었습니다',
+    skipFailed: '챔버 예열을 건너뛰지 못했습니다',
+  },
   nav: {
     printers: '프린터',
     archives: '아카이브',
@@ -1973,6 +1986,8 @@ export default {
     slicerCard: '슬라이서',
     orcaslicerApiUrl: 'OrcaSlicer 사이드카 URL',
     bambuStudioApiUrl: 'Bambu Studio 사이드카 URL',
+    slicerStallTimeout: '슬라이서 정지 시간 제한(분)',
+    slicerStallTimeoutDescription: '사이드카에서 이 시간 동안 진행 상황이 없으면 슬라이싱을 중단합니다. 진행 상황을 계속 보고하는 무거운 모델은 아무리 오래 걸려도 중단되지 않습니다. 진행 상황을 보고하지 않는 사이드카에서는 이 값이 전체 시간 제한으로 사용됩니다.',
     slicerApiUrlDescription: '슬라이서 API 사이드카 컨테이너의 URL. SLICER_API_URL / BAMBU_STUDIO_API_URL 환경 변수 기본값을 사용하려면 비워두세요.',
     slicerBundlesRemoved: {
       title: '슬라이서 번들 (제거됨)',

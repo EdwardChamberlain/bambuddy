@@ -1,6 +1,12 @@
 import json
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+# These integrations may legitimately target services on the same host or LAN.
+# Validate unsafe destinations while preserving Grove's local-first deployment
+# model; the shared guard rejects metadata, encoded-IP, multicast, unspecified,
+# and non-HTTP targets without banning private LAN addresses.
+LAN_SERVICE_URL_SETTINGS = ("ha_url", "obico_ml_url", "orcaslicer_api_url", "bambu_studio_api_url")
 
 
 class AppSettings(BaseModel):
@@ -253,6 +259,21 @@ class AppSettings(BaseModel):
         default="",
         description="BambuStudio sidecar URL (e.g. http://localhost:3001). Empty falls back to the BAMBU_STUDIO_API_URL env var.",
     )
+    # How long to keep waiting on a slice that isn't finishing. Measured against
+    # the sidecar's progress channel, not total elapsed time — a heavy model can
+    # legitimately slice for half an hour, and a wall-clock ceiling cannot tell
+    # that apart from a stalled one (#2730). Sidecars too old to report progress
+    # fall back to using this as a total-elapsed ceiling, which is the pre-#2730
+    # behaviour with a configurable number.
+    slicer_stall_timeout_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=240,
+        description=(
+            "Give up on a slice after this many minutes with no progress from the sidecar. "
+            "On sidecars that do not report progress, applies to total slicing time instead."
+        ),
+    )
 
     # Prometheus metrics endpoint
     prometheus_enabled: bool = Field(default=False, description="Enable Prometheus metrics endpoint at /metrics")
@@ -486,6 +507,7 @@ class AppSettingsUpdate(BaseModel):
     use_slicer_api: bool | None = None
     orcaslicer_api_url: str | None = None
     bambu_studio_api_url: str | None = None
+    slicer_stall_timeout_minutes: int | None = Field(default=None, ge=1, le=240)
     prometheus_enabled: bool | None = None
     prometheus_token: str | None = None
     low_stock_threshold: float | None = Field(default=None, ge=0.1, le=99.9)
@@ -527,6 +549,20 @@ class AppSettingsUpdate(BaseModel):
     obico_enabled_printers: str | None = None
     default_sidebar_order: str | None = None
     forecast_global_lead_time_days: int | None = Field(default=None, ge=0)
+
+    @field_validator(*LAN_SERVICE_URL_SETTINGS)
+    @classmethod
+    def validate_lan_service_url(cls, v: str | None, info: ValidationInfo) -> str | None:
+        """Reject SSRF-unsafe absolute URLs while allowing legacy host values."""
+        if v is None or not v.strip() or "://" not in v:
+            return v
+        from backend.app.api.routes._url_safety import assert_safe_lan_service_url
+
+        try:
+            assert_safe_lan_service_url(v.strip(), label=info.field_name or "URL")
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return v
 
     @field_validator("gcode_snippets")
     @classmethod

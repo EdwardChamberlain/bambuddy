@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "Chamber heat-soak",
+    temperature: "Target temperature (°C)",
+    duration: "Soak duration (minutes)",
+    status: "Preheating",
+    hint: "30–60°C, 1–120 minutes. The timer starts when the heating command is sent.",
+    bedOnly: "!! Chamber Heater not available on this machine. Heating will be completed using only the bed",
+    remaining: 'Remaining: {{time}}',
+    waitingForConfirmation: 'Waiting for heater confirmation',
+    skip: 'Skip heat soak',
+    skipped: 'Heat soak skipped',
+    skipFailed: 'Failed to skip heat soak',
+  },
   // Navigation
   nav: {
     printers: 'Printers',
@@ -2111,6 +2124,8 @@ export default {
     slicerCard: 'Slicer',
     orcaslicerApiUrl: 'OrcaSlicer sidecar URL',
     bambuStudioApiUrl: 'Bambu Studio sidecar URL',
+    slicerStallTimeout: 'Slicer stall timeout (minutes)',
+    slicerStallTimeoutDescription: 'Give up on a slice after this long with no progress from the sidecar. Heavy models that keep reporting progress are never cut off, however long they take. Sidecars that do not report progress use this as a total time limit instead.',
     slicerApiUrlDescription: 'URL of the slicer-API sidecar container. Leave blank to use the SLICER_API_URL / BAMBU_STUDIO_API_URL env var defaults.',
     slicerBundlesRemoved: {
       title: 'Slicer Bundles (removed)',

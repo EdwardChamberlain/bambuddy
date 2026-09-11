@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -100,6 +101,9 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     # can_queue — queue write ops + reprint (which enqueues an existing archive)
     Permission.QUEUE_CREATE: "can_queue",
     Permission.QUEUE_UPDATE_OWN: "can_queue",
+    # These ALL permissions also gate legitimate global queue operations
+    # (batch cancellation/reorder and archive reprint). Ownership-aware routes
+    # deliberately check the corresponding OWN permission below instead.
     Permission.QUEUE_UPDATE_ALL: "can_queue",
     Permission.QUEUE_DELETE_OWN: "can_queue",
     Permission.QUEUE_DELETE_ALL: "can_queue",
@@ -115,12 +119,9 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     Permission.SMART_PLUGS_CONTROL: "can_control_printer",
     # can_manage_library — file-manager scope (upload/rename/delete library
     # entries + MakerWorld import which downloads files into the library).
-    # OWN and ALL ownership variants map to the same scope so the
-    # `require_ownership_permission` checker (which gates on `all_perm`)
-    # passes the API key through. This matches `can_queue` and the
-    # archives/inventory scopes — API keys have no per-row ownership identity
-    # (line 1663), so splitting OWN/ALL across allowlist/denylist made the
-    # whole library curation surface unreachable for API keys (#1832).
+    # Both ownership variants retain the category scope for legacy/global
+    # endpoints. The ownership dependency resolves the key's user and checks
+    # the OWN permission, so row-level routes remain owner-scoped.
     # LIBRARY_PURGE stays admin-only as a genuinely destructive op that
     # bypasses the soft-delete window.
     Permission.LIBRARY_UPLOAD: "can_manage_library",
@@ -192,11 +193,9 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.ARCHIVES_DELETE_OWN,
         Permission.ARCHIVES_DELETE_ALL,
         Permission.ARCHIVES_PURGE,
-        # LIBRARY_UPDATE_ALL / LIBRARY_DELETE_ALL moved to the allowlist
-        # under `can_manage_library` (#1832) — split between allow/deny made
-        # the whole library curation surface unreachable for API keys via
-        # `require_ownership_permission`. Purge stays denied as a genuinely
-        # destructive op.
+        # Library purge remains denied; row-level file operations use the
+        # owner-resolving ownership dependency even though their ALL
+        # permissions retain the category scope above.
         Permission.LIBRARY_PURGE,
         Permission.PROJECTS_CREATE,
         Permission.PROJECTS_UPDATE,
@@ -347,7 +346,7 @@ def require_energy_cost_update():
                 if username is None:
                     raise credentials_exception
                 jti: str | None = payload.get("jti")
-                if not jti or await is_jti_revoked(jti):
+                if not jti or await is_jti_revoked(jti, db):
                     raise credentials_exception
                 iat: int | float | None = payload.get("iat")
             except JWTError:
@@ -732,16 +731,29 @@ async def revoke_jti(jti: str, expires_at: datetime, username: str | None = None
             await db.rollback()  # jti already revoked — desired state, ignore
 
 
-async def is_jti_revoked(jti: str) -> bool:
-    """Return True if the given jti has been revoked."""
-    async with async_session() as db:
-        result = await db.execute(
+async def is_jti_revoked(jti: str, db: AsyncSession | None = None) -> bool:
+    """Return True if the given jti has been revoked.
+
+    Pass ``db`` to reuse the caller's session instead of opening a new one
+    (issue #2572): the permission dependencies already hold a session, and a
+    second checkout per request doubled pool pressure — a login burst then
+    exhausted the pool. With ``db`` omitted a short session is opened as before,
+    for callers that check the jti before they have a session open.
+    """
+
+    async def _query(session: AsyncSession) -> bool:
+        result = await session.execute(
             select(AuthEphemeralToken).where(
                 AuthEphemeralToken.token == jti,
                 AuthEphemeralToken.token_type == "revoked_jti",
             )
         )
         return result.scalar_one_or_none() is not None
+
+    if db is not None:
+        return await _query(db)
+    async with async_session() as own_db:
+        return await _query(own_db)
 
 
 async def get_user_by_username(db: AsyncSession, username: str) -> User | None:
@@ -796,6 +808,33 @@ async def authenticate_user_by_email(db: AsyncSession, email: str, password: str
     return user
 
 
+# Short-lived cache for the auth-enabled flag (issue #2572). The middleware
+# and every ownership/permission dependency probe this once (or more) per
+# request; on a large farm that DB round-trip is pure overhead because the
+# value changes only when an admin toggles auth.
+#
+# SECURITY: only a ``True`` (auth-enabled) result is EVER cached. A disabled /
+# unconfigured result is never cached, so a stale cache can only ever cause a
+# request to REQUIRE auth that a moment ago wasn't required — it can never skip
+# an auth check that is now required. Staleness fails CLOSED, never open (cf.
+# GHSA-6mf4-q26m-47pv). ``set_auth_enabled`` invalidates explicitly on any
+# toggle; the TTL is only a backstop for out-of-band changes (a direct DB edit,
+# or another worker process in a multi-worker deployment).
+_AUTH_ENABLED_CACHE_TTL_SECONDS = 30.0
+_auth_enabled_cached_value: bool = False
+_auth_enabled_cached_until: float = 0.0
+
+
+def invalidate_auth_enabled_cache() -> None:
+    """Drop the cached auth-enabled flag so the next probe re-reads the DB.
+
+    Call after any write that toggles the ``auth_enabled`` setting.
+    """
+    global _auth_enabled_cached_value, _auth_enabled_cached_until
+    _auth_enabled_cached_value = False
+    _auth_enabled_cached_until = 0.0
+
+
 async def is_auth_enabled(db: AsyncSession) -> bool:
     """Check if authentication is enabled.
 
@@ -812,12 +851,25 @@ async def is_auth_enabled(db: AsyncSession) -> bool:
     no exception. Any OTHER failure (connection error, fd exhaustion,
     schema mismatch, …) propagates so the caller can deny the request
     (503 / 500). Fail-closed is the only safe default for an auth probe.
+
+    Result is cached briefly to cut per-request DB load on large farms; only
+    the enabled=True result is cached, so a stale read can only fail closed.
+    See the module-level cache comment above.
     """
+    global _auth_enabled_cached_value, _auth_enabled_cached_until
+    if _auth_enabled_cached_value and time.monotonic() < _auth_enabled_cached_until:
+        return True
+
     result = await db.execute(select(Settings).where(Settings.key == "auth_enabled"))
     setting = result.scalar_one_or_none()
-    if setting is None:
-        return False
-    return setting.value.lower() == "true"
+    enabled = setting is not None and setting.value.lower() == "true"
+    if enabled:
+        _auth_enabled_cached_value = True
+        _auth_enabled_cached_until = time.monotonic() + _AUTH_ENABLED_CACHE_TTL_SECONDS
+    else:
+        # Never cache "disabled" — keep failing closed on any future staleness.
+        _auth_enabled_cached_value = False
+    return enabled
 
 
 async def _user_from_api_key(db: AsyncSession, api_key: APIKey) -> User | None:
@@ -840,6 +892,38 @@ async def _user_from_api_key(db: AsyncSession, api_key: APIKey) -> User | None:
         # access fails closed.
         return None
     return user
+
+
+async def resolve_api_key_owner(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """Return the active owner for an API-keyed request.
+
+    Permission dependencies still decide whether the operation is allowed.
+    This dependency only supplies the identity needed to stamp newly-created
+    rows. Legacy ownerless keys are rejected here rather than creating rows
+    that cannot later be accessed through an ownership-scoped route.
+    """
+    api_key_value = x_api_key
+    if api_key_value is None and credentials and credentials.credentials.startswith("bb_"):
+        api_key_value = credentials.credentials
+    if api_key_value is None:
+        return None
+
+    api_key = await _validate_api_key(db, api_key_value)
+    if api_key is None:
+        # The operation's permission dependency reports invalid credentials;
+        # avoid changing that response shape in this identity-only helper.
+        return None
+    owner = await _user_from_api_key(db, api_key)
+    if owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API-keyed writes require an active API key owner",
+        )
+    return owner
 
 
 async def _validate_api_key(db: AsyncSession, api_key_value: str) -> APIKey | None:
@@ -907,13 +991,16 @@ async def get_current_user_optional(
         if username is None:
             raise _unauthorized
         jti: str | None = payload.get("jti")
-        if not jti or await is_jti_revoked(jti):
-            raise _unauthorized  # I6: revoked token → 401, not anonymous
         iat: int | float | None = payload.get("iat")
     except JWTError:
         raise _unauthorized
 
+    if not jti:
+        raise _unauthorized  # I6: revoked token → 401, not anonymous
+
     async with async_session() as db:
+        if await is_jti_revoked(jti, db):
+            raise _unauthorized  # I6: revoked token → 401, not anonymous
         user = await get_user_by_username(db, username)
         if user is None or not user.is_active:
             raise _unauthorized
@@ -940,13 +1027,16 @@ async def get_current_user(
         if username is None:
             raise credentials_exception
         jti: str | None = payload.get("jti")
-        if not jti or await is_jti_revoked(jti):
-            raise credentials_exception
         iat: int | float | None = payload.get("iat")
     except JWTError:
         raise credentials_exception
 
+    if not jti:
+        raise credentials_exception
+
     async with async_session() as db:
+        if await is_jti_revoked(jti, db):
+            raise credentials_exception
         user = await get_user_by_username(db, username)
         if user is None:
             raise credentials_exception
@@ -1016,7 +1106,7 @@ async def require_auth_if_enabled(
                         headers={"WWW-Authenticate": "Bearer"},
                     )
                 jti: str | None = payload.get("jti")
-                if not jti or await is_jti_revoked(jti):
+                if not jti or await is_jti_revoked(jti, db):
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Could not validate credentials",
@@ -1122,7 +1212,7 @@ def require_admin_if_auth_enabled():
                         headers={"WWW-Authenticate": "Bearer"},
                     )
                 jti: str | None = payload.get("jti")
-                if not jti or await is_jti_revoked(jti):
+                if not jti or await is_jti_revoked(jti, db):
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Could not validate credentials",
@@ -1362,7 +1452,7 @@ def require_permission(*permissions: str | Permission):
                 if username is None:
                     raise credentials_exception
                 jti: str | None = payload.get("jti")
-                if not jti or await is_jti_revoked(jti):
+                if not jti or await is_jti_revoked(jti, db):
                     raise credentials_exception
                 iat: int | float | None = payload.get("iat")
             except JWTError:
@@ -1449,7 +1539,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
                             headers={"WWW-Authenticate": "Bearer"},
                         )
                     jti: str | None = payload.get("jti")
-                    if not jti or await is_jti_revoked(jti):
+                    if not jti or await is_jti_revoked(jti, db):
                         raise HTTPException(
                             status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Could not validate credentials",
@@ -1549,7 +1639,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
                             headers={"WWW-Authenticate": "Bearer"},
                         )
                     jti: str | None = payload.get("jti")
-                    if not jti or await is_jti_revoked(jti):
+                    if not jti or await is_jti_revoked(jti, db):
                         raise HTTPException(
                             status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Could not validate credentials",
@@ -1632,13 +1722,11 @@ def require_ownership_permission(
     - User with ``own_permission`` can only modify items where created_by_id == user.id
     - Ownerless items (created_by_id = null) require ``all_permission``
     - API keys (via X-API-Key header or Bearer bb_xxx) must satisfy the
-      ``all_permission``'s API-key scope flag (e.g. ``can_queue`` for
-      ``QUEUE_UPDATE_ALL``) and then receive ``can_modify_all=True``.
-      OWN/ALL ownership pairs map to the same scope flag in
-      ``_APIKEY_SCOPE_BY_PERMISSION`` so checking ``all_permission`` is the
-      correct gate; API keys have no per-row ownership identity. Pre-
-      GHSA-r2qv-8222-hqg3 fix this returned ``(None, True)`` for any valid
-      key with no scope check — see ``core/auth.py`` allowlist commentary.
+      ``own_permission``'s scope flag and are evaluated as the owner of the
+      key. API keys are intentionally own-only: the key record has no
+      all-ownership capability, and an ownerless legacy key cannot safely be
+      used on an ownership-scoped route. Pre-GHSA-r2qv-8222-hqg3 this
+      returned ``(None, True)`` for any valid key with no scope check.
 
     Returns:
         A dependency function that returns (user, can_modify_all).
@@ -1665,17 +1753,19 @@ def require_ownership_permission(
             # GHSA-r2qv-8222-hqg3: previously API keys received (None, True)
             # unconditionally on ownership-modify routes — a "queue-only" key
             # could delete any user's archives, library files, queue items.
-            # OWN and ALL ownership perms both map to the same scope flag
-            # (e.g. both QUEUE_UPDATE_OWN and QUEUE_UPDATE_ALL → can_queue),
-            # so checking ``all_perm`` against the api_key's scope is the
-            # correct gate. API keys don't have per-row ownership identity, so
-            # on pass we keep can_modify_all=True (preserves prior intent,
-            # narrows access to keys with the right scope flag).
+            # API keys are owner-scoped, so use the own permission and resolve
+            # the key's owner before any route can evaluate a row.
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, [all_perm])
-                    return None, True
+                    _check_apikey_permissions(api_key, [own_perm])
+                    owner = await _user_from_api_key(db, api_key)
+                    if owner is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Ownership-scoped routes require an API key with an active owner",
+                        )
+                    return owner, False
 
             # Check for Bearer token (could be JWT or API key)
             if credentials is not None:
@@ -1684,8 +1774,14 @@ def require_ownership_permission(
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, [all_perm])
-                        return None, True
+                        _check_apikey_permissions(api_key, [own_perm])
+                        owner = await _user_from_api_key(db, api_key)
+                        if owner is None:
+                            raise HTTPException(
+                                status_code=status.HTTP_403_FORBIDDEN,
+                                detail="Ownership-scoped routes require an API key with an active owner",
+                            )
+                        return owner, False
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Invalid API key",
@@ -1703,7 +1799,7 @@ def require_ownership_permission(
                             headers={"WWW-Authenticate": "Bearer"},
                         )
                     jti: str | None = payload.get("jti")
-                    if not jti or await is_jti_revoked(jti):
+                    if not jti or await is_jti_revoked(jti, db):
                         raise HTTPException(
                             status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Could not validate credentials",

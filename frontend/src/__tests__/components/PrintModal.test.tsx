@@ -403,7 +403,17 @@ describe('PrintModal', () => {
       });
     });
 
-    it('shows print options toggle', async () => {
+    it('keeps print modal option sections collapsed for direct printer-page prints', async () => {
+      server.use(
+        http.get('/api/v1/archives/:id/filament-requirements', () =>
+          HttpResponse.json({
+            filaments: [
+              { slot_id: 1, type: 'PLA', color: '#FF0000', used_grams: 10, used_meters: 3 },
+            ],
+          }),
+        ),
+      );
+
       render(
         <PrintModal
           mode="create"
@@ -416,8 +426,11 @@ describe('PrintModal', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText('Print Options')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Print Options' })).toHaveAttribute('aria-expanded', 'false');
       });
+      expect(screen.getByRole('button', { name: /Filament Mapping/i })).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.getByRole('button', { name: /Queue options/i })).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByText('Auto-level bed before print')).not.toBeInTheDocument();
     });
 
     it('keeps model filament controls collapsed until they are needed', async () => {
@@ -579,6 +592,7 @@ describe('PrintModal', () => {
         />
       );
 
+      await user.click(await screen.findByRole('button', { name: /Filament Mapping/i }));
       const forceMatch = await screen.findByLabelText(/Match colour/i) as HTMLInputElement;
       expect(forceMatch).toBeChecked();
 
@@ -625,6 +639,7 @@ describe('PrintModal', () => {
         />
       );
 
+      await user.click(await screen.findByRole('button', { name: /Filament Mapping/i }));
       const forceMatch = await screen.findByLabelText(/Match colour/i) as HTMLInputElement;
       await user.click(forceMatch);
       expect(forceMatch).not.toBeChecked();
@@ -681,6 +696,7 @@ describe('PrintModal', () => {
         />
       );
 
+      await user.click(await screen.findByRole('button', { name: /Filament Mapping/i }));
       const mappingSelect = await waitFor(() => {
         const select = screen
           .getAllByRole('combobox')
@@ -770,6 +786,51 @@ describe('PrintModal', () => {
 
       await user.click(screen.getByRole('button', { name: /queue options/i }));
       expect(screen.getByRole('checkbox', { name: /insert at top of queue/i })).toBeInTheDocument();
+    });
+
+    it('defaults heat soak off, shows bed-only guidance, and submits explicit settings', async () => {
+      let body: Record<string, unknown> | undefined;
+      server.use(http.post('/api/v1/queue/', async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ id: 1, status: 'pending' });
+      }));
+      const user = userEvent.setup();
+      render(<PrintModal mode="create" archiveId={1} initialSelectedPrinterIds={[1]} onClose={mockOnClose} />);
+      await user.click(screen.getByRole('button', { name: /queue options/i }));
+      const toggle = screen.getByRole('checkbox', { name: 'Chamber heat-soak' });
+      expect(toggle).not.toBeChecked();
+      expect(screen.queryByRole('spinbutton', { name: 'Target temperature (°C)' })).not.toBeInTheDocument();
+      await user.click(toggle);
+      const temperature = screen.getByRole('spinbutton', { name: 'Target temperature (°C)' });
+      const duration = screen.getByRole('spinbutton', { name: 'Soak duration (minutes)' });
+      expect(temperature).toHaveValue(60);
+      expect(duration).toHaveValue(30);
+      const chamberGroup = toggle.closest('label')?.parentElement;
+      expect(chamberGroup).not.toBeNull();
+      expect(chamberGroup).toContainElement(temperature);
+      expect(chamberGroup).toContainElement(duration);
+      expect(screen.getByText(/Chamber Heater not available on this machine/)).toBeInTheDocument();
+      fireEvent.change(temperature, { target: { value: '55' } });
+      fireEvent.change(duration, { target: { value: '15' } });
+      await user.click(screen.getByRole('button', { name: /^print$/i }));
+      await waitFor(() => expect(body).toMatchObject({ chamber_heat_soak: true, heat_soak_temperature: 55, heat_soak_minutes: 15 }));
+    });
+
+    it('restores heat-soak settings when editing and rejects invalid ranges', async () => {
+      const user = userEvent.setup();
+      render(<PrintModal mode="edit-queue-item" queueItem={createMockQueueItem({ chamber_heat_soak: true, heat_soak_temperature: 50, heat_soak_minutes: 10 })} onClose={mockOnClose} />);
+      await user.click(screen.getByRole('button', { name: /queue options/i }));
+      expect(screen.getByRole('checkbox', { name: 'Chamber heat-soak' })).toBeChecked();
+      const temperature = screen.getByRole('spinbutton', { name: 'Target temperature (°C)' });
+      expect(temperature).toHaveValue(50);
+      expect(screen.getByRole('spinbutton', { name: 'Soak duration (minutes)' })).toHaveValue(10);
+      fireEvent.change(temperature, { target: { value: '61' } });
+      expect(screen.getByRole('button', { name: /save/i })).toBeDisabled();
+      fireEvent.change(temperature, { target: { value: '' } });
+      expect(screen.getByRole('button', { name: /save/i })).toBeDisabled();
+      fireEvent.change(temperature, { target: { value: '60' } });
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Soak duration (minutes)' }), { target: { value: '0' } });
+      expect(screen.getByRole('button', { name: /save/i })).toBeDisabled();
     });
 
     it('offers an ungated wait-for-drying policy and defaults it off', async () => {

@@ -33,7 +33,6 @@ import {
   SkipForward,
   ExternalLink,
   Power,
-  StopCircle,
   Pencil,
   RefreshCw,
   Timer,
@@ -80,6 +79,12 @@ function formatWeight(g: number, useKg = false): string {
   return `${Math.round(g)}g`;
 }
 
+function formatHeatSoakCountdown(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
 function StatusBadge({ status, scheduledTime, waitingReason, printerState, t }: { status: PrintQueueItem['status']; scheduledTime?: string | null; waitingReason?: string | null; printerState?: string | null; t: (key: string) => string }) {
   // A future pending job has its own explicit status. The relative timestamp
   // in the row is useful context, but the pill makes the scheduler state clear.
@@ -114,6 +119,7 @@ function StatusBadge({ status, scheduledTime, waitingReason, printerState, t }: 
 
   const config = {
     pending: { icon: Clock, color: 'text-status-warning bg-status-warning/10 border-status-warning/20', label: t('queue.status.pending') },
+    preheating: { icon: Timer, color: 'text-amber-300 bg-amber-500/10 border-amber-500/20', label: t('heatSoak.status') },
     dispatching: { icon: Timer, color: 'text-purple-300 bg-purple-500/10 border-purple-500/20', label: t('queue.status.dispatching') },
     printing: { icon: Play, color: 'text-blue-400 bg-blue-400/10 border-blue-400/20', label: t('queue.status.printing') },
     completed: { icon: CheckCircle, color: 'text-status-ok bg-status-ok/10 border-status-ok/20', label: t('queue.status.completed') },
@@ -319,6 +325,8 @@ function SortableQueueItem({
   onCancel,
   onRemove,
   onStop,
+  onSkipHeatSoak,
+  isSkippingHeatSoak = false,
   onRequeue,
   onStart,
   timeFormat = 'system',
@@ -335,6 +343,8 @@ function SortableQueueItem({
   onCancel: () => void;
   onRemove: () => void;
   onStop: () => void;
+  onSkipHeatSoak?: () => void;
+  isSkippingHeatSoak?: boolean;
   onRequeue: () => void;
   onStart: () => void;
   timeFormat?: TimeFormat;
@@ -390,12 +400,25 @@ function SortableQueueItem({
     transition,
   };
 
-  const isPrinting = item.status === 'printing';
+  const isPrinting = item.status === 'printing' || item.status === 'preheating';
   const isDispatching = item.status === 'dispatching';
   const isPending = item.status === 'pending';
   const isHistory = ['completed', 'failed', 'skipped', 'cancelled'].includes(item.status);
 
   const isMobileSelectable = isPending && onToggleSelect;
+
+  const [countdownNow, setCountdownNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (item.status !== 'preheating') return;
+
+    const interval = window.setInterval(() => setCountdownNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [item.status]);
+
+  const preheatStartedAt = item.preheat_started_at ? parseUTCDate(item.preheat_started_at) : null;
+  const heatSoakRemainingSeconds = item.status === 'preheating' && preheatStartedAt && item.heat_soak_minutes
+    ? Math.max(0, item.heat_soak_minutes * 60 - Math.floor((countdownNow - preheatStartedAt.getTime()) / 1000))
+    : null;
 
   return (
     <div
@@ -650,6 +673,17 @@ function SortableQueueItem({
             );
           })()}
 
+          {item.status === 'preheating' && (
+            <div className="mt-2 flex items-center gap-1.5 text-xs text-amber-300">
+              <Timer className="w-3 h-3" />
+              <span>
+                {heatSoakRemainingSeconds !== null
+                  ? t('heatSoak.remaining', { time: formatHeatSoakCountdown(heatSoakRemainingSeconds) })
+                  : t('heatSoak.waitingForConfirmation')}
+              </span>
+            </div>
+          )}
+
           {/* Waiting reason for model-based assignments */}
           {item.waiting_reason && item.status === 'pending' && (
             <p className="text-[10px] sm:text-xs text-purple-400 mt-1.5 sm:mt-2 flex items-start gap-1">
@@ -683,16 +717,30 @@ function SortableQueueItem({
           <StatusBadge status={item.status} scheduledTime={item.scheduled_time} waitingReason={item.waiting_reason} printerState={printerState} t={t} />
 
           <div className="flex items-center gap-0.5 sm:gap-1">
+            {item.status === 'preheating' && onSkipHeatSoak && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onSkipHeatSoak}
+                disabled={isSkippingHeatSoak || !canModify('queue', 'update', item.created_by_id)}
+                aria-label={t('heatSoak.skip')}
+                title={!canModify('queue', 'update', item.created_by_id) ? t('queue.permissions.noStopPrint') : t('heatSoak.skip')}
+                className="min-h-[26px] border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20 hover:text-amber-200"
+              >
+                <SkipForward className="w-4 h-4" />
+              </Button>
+            )}
             {(isDispatching || isPrinting) && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={onStop}
                 disabled={!canModify('queue', 'update', item.created_by_id)}
+                aria-label={t('queue.actions.stopPrint')}
                 title={!canModify('queue', 'update', item.created_by_id) ? t('queue.permissions.noStopPrint') : t('queue.actions.stopPrint')}
-                className="text-red-400 hover:text-red-300 hover:bg-red-500/10 p-1.5 sm:p-2"
+                className="min-h-[26px] border border-red-500/30 bg-red-500/10 px-2 py-1 text-red-400 hover:bg-red-500/20 hover:text-red-300"
               >
-                <StopCircle className="w-4 h-4" />
+                <X className="w-4 h-4" />
               </Button>
             )}
             {isPending && (
@@ -1368,6 +1416,15 @@ export function QueuePage() {
     onError: () => showToast(t('queue.toast.stopFailed'), 'error'),
   });
 
+  const skipHeatSoakMutation = useMutation({
+    mutationFn: (id: number) => api.skipQueueHeatSoak(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['queue'] });
+      showToast(t('heatSoak.skipped'));
+    },
+    onError: () => showToast(t('heatSoak.skipFailed'), 'error'),
+  });
+
   // Filament-deficit confirmation state (#1496). When the backend returns
   // 409 with `code=insufficient_filament` we stash the deficit + item id
   // here; the modal at the bottom of the page reads it and the "Print
@@ -1588,7 +1645,7 @@ export function QueuePage() {
   };
 
   const activeItems = useMemo(() => {
-    let items = queue?.filter(i => i.status === 'dispatching' || i.status === 'printing') || [];
+    let items = queue?.filter(i => i.status === 'preheating' || i.status === 'dispatching' || i.status === 'printing') || [];
     if (filterLocation) {
       items = items.filter(matchesLocationFilter);
     }
@@ -2036,6 +2093,7 @@ export function QueuePage() {
           options={[
             { value: '', label: t('queue.filter.allStatus') },
             { value: 'pending', label: t('queue.status.pending') },
+            { value: 'preheating', label: t('heatSoak.status') },
             { value: 'dispatching', label: t('queue.status.dispatching') },
             { value: 'printing', label: t('queue.status.printing') },
             { value: 'completed', label: t('queue.status.completed') },
@@ -2139,7 +2197,7 @@ export function QueuePage() {
               setRequeueItem(item);
             } else if (item.status === 'pending') {
               setEditItem(item);
-            } else if (item.status === 'dispatching' || item.status === 'printing') {
+            } else if (item.status === 'preheating' || item.status === 'dispatching' || item.status === 'printing') {
               setConfirmAction({ type: 'stop', item });
             }
           }}
@@ -2180,6 +2238,8 @@ export function QueuePage() {
                     onCancel={() => {}}
                     onRemove={() => {}}
                     onStop={() => setConfirmAction({ type: 'stop', item })}
+                    onSkipHeatSoak={() => skipHeatSoakMutation.mutate(item.id)}
+                    isSkippingHeatSoak={skipHeatSoakMutation.isPending}
                     onRequeue={() => {}}
                     onStart={() => {}}
                     timeFormat={timeFormat}

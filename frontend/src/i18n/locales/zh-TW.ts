@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "腔體預熱",
+    temperature: "目標溫度 (°C)",
+    duration: "保溫時間（分鐘）",
+    status: "預熱中",
+    hint: "30–60°C，1–120分鐘。送出加熱指令後開始計時。",
+    bedOnly: "!! 此機型沒有腔體加熱器。將僅使用熱床加熱。",
+    remaining: '剩餘：{{time}}',
+    waitingForConfirmation: '等待加熱器確認',
+    skip: '略過腔體預熱',
+    skipped: '已略過腔體預熱',
+    skipFailed: '無法略過腔體預熱',
+  },
   // Navigation
   nav: {
     printers: '印表機',
@@ -2098,6 +2111,8 @@ export default {
     slicerCard: '切片器',
     orcaslicerApiUrl: 'OrcaSlicer sidecar URL',
     bambuStudioApiUrl: 'Bambu Studio sidecar URL',
+    slicerStallTimeout: '切片器停滯逾時（分鐘）',
+    slicerStallTimeoutDescription: '若 sidecar 在此時長內沒有任何進度，則放棄本次切片。持續回報進度的複雜模型無論耗時多久都不會被中斷。不回報進度的 sidecar 則將此值作為總時長上限。',
     slicerApiUrlDescription: 'slicer-API sidecar 容器的 URL。留空以使用 SLICER_API_URL / BAMBU_STUDIO_API_URL 環境變數預設值。',
     slicerBundlesRemoved: {
       title: '切片器捆綁包（已移除）',

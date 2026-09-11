@@ -34,6 +34,7 @@ from backend.app.schemas.print_queue import (
     PrintQueueItemUpdate,
     PrintQueueReorder,
 )
+from backend.app.services.chamber_heat_soak import abort_heat_soak, lock_queue_item, skip_heat_soak
 from backend.app.services.filament_deficit import compute_deficit_for_queue_item
 from backend.app.services.filament_requirements import (
     build_queue_filament_overrides,
@@ -120,6 +121,10 @@ def _enrich_response(item: PrintQueueItem) -> PrintQueueItemResponse:
         "auto_off_after": item.auto_off_after,
         "manual_start": item.manual_start,
         "wait_for_drying_complete": bool(item.wait_for_drying_complete),
+        "chamber_heat_soak": bool(item.chamber_heat_soak),
+        "heat_soak_temperature": item.heat_soak_temperature,
+        "heat_soak_minutes": item.heat_soak_minutes,
+        "preheat_started_at": item.preheat_started_at,
         "filament_short": bool(item.filament_short),
         "skip_filament_check": bool(item.skip_filament_check),
         "ams_mapping": ams_mapping_parsed,
@@ -598,6 +603,9 @@ async def add_to_queue(
             auto_off_after=data.auto_off_after,
             manual_start=data.manual_start,
             wait_for_drying_complete=data.wait_for_drying_complete,
+            chamber_heat_soak=data.chamber_heat_soak,
+            heat_soak_temperature=data.heat_soak_temperature,
+            heat_soak_minutes=data.heat_soak_minutes,
             skip_filament_check=data.skip_filament_check,
             ams_mapping=ams_mapping_json,
             plate_id=data.plate_id,
@@ -728,7 +736,8 @@ async def bulk_update_queue_items(
     skipped_count = 0
 
     for item in items:
-        if item.status != "pending":
+        item = await lock_queue_item(db, item.id)
+        if not item or item.status != "pending":
             skipped_count += 1
             continue
 
@@ -1023,8 +1032,7 @@ async def update_queue_item(
     """Update a queue item."""
     user, can_modify_all = auth_result
 
-    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
-    item = result.scalar_one_or_none()
+    item = await lock_queue_item(db, item_id)
     if not item:
         raise HTTPException(404, "Queue item not found")
 
@@ -1033,7 +1041,7 @@ async def update_queue_item(
         if item.created_by_id != user.id:
             raise HTTPException(403, "You can only update your own queue items")
 
-    if item.status != "pending":
+    if item.status not in ("pending", "preheating"):
         raise HTTPException(400, "Can only update pending items")
 
     update_data = data.model_dump(exclude_unset=True)
@@ -1148,6 +1156,11 @@ async def update_queue_item(
             json.dumps(update_data["nozzle_mapping"]) if update_data["nozzle_mapping"] else None
         )
 
+    if item.status == "preheating":
+        await abort_heat_soak(db, item, "Heat soak stopped for editing", status="pending")
+        item = await lock_queue_item(db, item_id)
+        update_data["manual_start"] = True
+
     for field, value in update_data.items():
         setattr(item, field, value)
 
@@ -1172,8 +1185,7 @@ async def delete_queue_item(
     """Remove an item from the queue."""
     user, can_modify_all = auth_result
 
-    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
-    item = result.scalar_one_or_none()
+    item = await lock_queue_item(db, item_id)
     if not item:
         raise HTTPException(404, "Queue item not found")
 
@@ -1185,6 +1197,9 @@ async def delete_queue_item(
     if item.status in ("dispatching", "printing"):
         raise HTTPException(400, "Cannot delete an item that is being dispatched or is currently printing")
 
+    if item.status == "preheating":
+        await abort_heat_soak(db, item, "Heat soak deleted", status="cancelled")
+        item = await lock_queue_item(db, item_id)
     await db.delete(item)
     await db.commit()
 
@@ -1282,8 +1297,7 @@ async def cancel_queue_item(
     """Cancel a pending queue item."""
     user, can_modify_all = auth_result
 
-    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
-    item = result.scalar_one_or_none()
+    item = await lock_queue_item(db, item_id)
     if not item:
         raise HTTPException(404, "Queue item not found")
 
@@ -1291,6 +1305,10 @@ async def cancel_queue_item(
     if not can_modify_all:
         if item.created_by_id != user.id:
             raise HTTPException(403, "You can only cancel your own queue items")
+
+    if item.status == "preheating":
+        await abort_heat_soak(db, item, "Heat soak cancelled by user", status="cancelled")
+        return {"message": "Heat soak cancelled"}
 
     if item.status not in ("pending",):
         raise HTTPException(400, f"Cannot cancel item with status '{item.status}'")
@@ -1328,8 +1346,7 @@ async def stop_queue_item(
 
     user, can_modify_all = auth_result
 
-    result = await db.execute(select(PrintQueueItem).where(PrintQueueItem.id == item_id))
-    item = result.scalar_one_or_none()
+    item = await lock_queue_item(db, item_id)
     if not item:
         raise HTTPException(404, "Queue item not found")
 
@@ -1339,6 +1356,12 @@ async def stop_queue_item(
     if not can_modify_all and user is not None:
         if item.created_by_id is None or item.created_by_id != user.id:
             raise HTTPException(403, "You can only stop your own queue items")
+
+    if item.status == "preheating" or (
+        item.status == "dispatching" and item.chamber_heat_soak and not item.dispatch_subtask_id
+    ):
+        await abort_heat_soak(db, item, "Heat soak stopped by user", status="cancelled")
+        return {"message": "Heat soak stopped"}
 
     if item.status not in ("dispatching", "printing"):
         raise HTTPException(
@@ -1380,6 +1403,10 @@ async def stop_queue_item(
 
     unregister_expected_print(printer_id)
 
+    if item.chamber_heat_soak:
+        item = await lock_queue_item(db, item_id)
+        await abort_heat_soak(db, item, item.error_message, status="cancelled")
+
     # Get smart plug info if auto-off is enabled
     plug_ip = None
     if auto_off_after:
@@ -1409,6 +1436,36 @@ async def stop_queue_item(
         spawn_background_task(cooldown_and_poweroff(), name=f"queue-cooldown-poweroff-{printer_id}")
 
     return {"message": "Print stopped" if stop_sent else "Queue item cancelled (printer was offline)"}
+
+
+@router.post("/{item_id}/skip-heat-soak")
+async def skip_queue_item_heat_soak(
+    item_id: int,
+    db: AsyncSession = Depends(get_db),
+    auth_result: tuple[User | None, bool] = Depends(
+        require_ownership_permission(
+            Permission.QUEUE_UPDATE_ALL,
+            Permission.QUEUE_UPDATE_OWN,
+        )
+    ),
+):
+    """Skip the active heat-soak stage and return the item to dispatchable state."""
+    user, can_modify_all = auth_result
+
+    item = await lock_queue_item(db, item_id)
+    if not item:
+        raise HTTPException(404, "Queue item not found")
+
+    if not can_modify_all and user is not None:
+        if item.created_by_id is None or item.created_by_id != user.id:
+            raise HTTPException(403, "You can only update your own queue items")
+
+    if item.status != "preheating":
+        raise HTTPException(400, f"Can only skip heat soak for preheating items, current status: '{item.status}'")
+
+    await skip_heat_soak(db, item)
+    logger.info("Skipped heat soak for queue item %s", item_id)
+    return {"message": "Heat soak skipped"}
 
 
 @router.post("/{item_id}/start")

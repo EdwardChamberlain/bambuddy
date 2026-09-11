@@ -6,6 +6,7 @@ import socket
 import ssl
 import threading
 import time
+import weakref
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from ftplib import FTP, FTP_TLS  # nosec B402
@@ -16,6 +17,23 @@ from typing import TypeVar
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# A flat wall-clock cap punishes large files on slow but healthy links. Use a
+# deliberately pessimistic throughput floor as a backstop instead; a dead link
+# is detected sooner by the blocking socket timeout.
+_UPLOAD_FLOOR_BYTES_PER_SEC = 25 * 1024
+_UPLOAD_MIN_TIMEOUT = 600.0
+_UPLOAD_CANCEL_GRACE = 60.0
+
+
+class UploadCancelled(Exception):
+    """Raised when an in-flight upload exceeds its deadline and is stopped."""
+
+
+# Do not repeatedly open doomed FTPS connections after a TLS handshake failure.
+# A successful connection clears the gate; five minutes gives a restarted
+# printer a reasonable recovery window without hammering an unavailable one.
+_HANDSHAKE_COOLOFF_SECONDS = 300.0
 
 
 class DeleteResult(Enum):
@@ -125,6 +143,10 @@ class BambuFTPClient:
     # Maps IP -> "prot_p" or "prot_c"
     _mode_cache: dict[str, str] = {}
 
+    # Printers whose FTPS handshake failed, mapped to the monotonic expiry.
+    _handshake_blocked_until: dict[str, float] = {}
+    _handshake_skip_logged: dict[str, float] = {}
+
     def __init__(
         self,
         ip_address: str,
@@ -132,12 +154,15 @@ class BambuFTPClient:
         timeout: float | None = None,
         printer_model: str | None = None,
         force_prot_c: bool = False,
+        respect_handshake_cooloff: bool = True,
     ):
+        """Create a client; bounded user-initiated work may bypass cooldown."""
         self.ip_address = ip_address
         self.access_code = access_code
         self.timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT
         self.printer_model = printer_model
         self.force_prot_c = force_prot_c
+        self.respect_handshake_cooloff = respect_handshake_cooloff
         self._ftp: ImplicitFTP_TLS | None = None
 
     def _is_a1_model(self) -> bool:
@@ -168,8 +193,38 @@ class BambuFTPClient:
         # Default: try prot_p first (will fall back if needed)
         return False
 
+    @classmethod
+    def handshake_blocked(cls, ip_address: str) -> bool:
+        """Return whether the printer is in the post-handshake cooldown."""
+        deadline = cls._handshake_blocked_until.get(ip_address)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            cls._handshake_blocked_until.pop(ip_address, None)
+            cls._handshake_skip_logged.pop(ip_address, None)
+            return False
+        return True
+
     def connect(self) -> bool:
         """Connect to the printer FTP server (implicit FTPS on port 990)."""
+        if self.respect_handshake_cooloff and self.handshake_blocked(self.ip_address):
+            deadline = self._handshake_blocked_until.get(self.ip_address)
+            remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else 0.0
+            if deadline is not None and self._handshake_skip_logged.get(self.ip_address) != deadline:
+                self._handshake_skip_logged[self.ip_address] = deadline
+                logger.warning(
+                    "FTP connect to %s not attempted: FTPS handshake is cooling off for another %.0fs. "
+                    "Nothing was sent to the printer",
+                    self.ip_address,
+                    remaining,
+                )
+            else:
+                logger.debug(
+                    "FTP connect to %s skipped: still cooling off for another %.0fs",
+                    self.ip_address,
+                    remaining,
+                )
+            return False
         try:
             use_prot_c = self._should_use_prot_c()
             from backend.app.services.ftp_profiles import get_ftp_profile
@@ -202,6 +257,8 @@ class BambuFTPClient:
             logger.info(
                 f"FTP connected successfully to {self.ip_address} (model={self.printer_model}, prot_c={use_prot_c})"
             )
+            self._handshake_blocked_until.pop(self.ip_address, None)
+            self._handshake_skip_logged.pop(self.ip_address, None)
             return True
         except ftplib.error_perm as e:
             logger.warning("FTP connection permission error to %s: %s", self.ip_address, e)
@@ -212,7 +269,13 @@ class BambuFTPClient:
             self._ftp = None
             return False
         except ssl.SSLError as e:
-            logger.warning("FTP SSL error connecting to %s: %s", self.ip_address, e)
+            logger.warning(
+                "FTP SSL error connecting to %s: %s; pausing FTP for %.0fs",
+                self.ip_address,
+                e,
+                _HANDSHAKE_COOLOFF_SECONDS,
+            )
+            self._handshake_blocked_until[self.ip_address] = time.monotonic() + _HANDSHAKE_COOLOFF_SECONDS
             self._ftp = None
             return False
         except (OSError, ftplib.Error) as e:
@@ -726,6 +789,16 @@ class BambuFTPClient:
         return result if result else None
 
 
+def ftps_handshake_blocked(ip_address: str) -> bool:
+    """Return whether background FTP sweeps should skip this printer."""
+    return BambuFTPClient.handshake_blocked(ip_address)
+
+
+def ftps_handshake_cooloff_deadline(ip_address: str) -> float | None:
+    """Return the current monotonic cooldown deadline, if any."""
+    return BambuFTPClient._handshake_blocked_until.get(ip_address)
+
+
 # Shared 3MF download cache (#972).
 #
 # Both the cover thumbnail endpoint (api/routes/printers.py) and the archive
@@ -825,6 +898,7 @@ async def download_file_async(
     timeout: float = 60.0,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    respect_handshake_cooloff: bool = True,
 ) -> bool:
     """Async wrapper for downloading a file with timeout.
 
@@ -862,6 +936,7 @@ async def download_file_async(
                 timeout=socket_timeout,
                 printer_model=printer_model,
                 force_prot_c=force_prot_c,
+                respect_handshake_cooloff=respect_handshake_cooloff,
             )
             if client.connect():
                 try:
@@ -938,17 +1013,26 @@ async def download_file_try_paths_async(
     local_path: Path,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 90.0,
+    respect_handshake_cooloff: bool = True,
 ) -> bool:
     """Try downloading a file from multiple paths using a single connection.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall async cap, including time waiting for an executor slot
     """
     loop = asyncio.get_event_loop()
 
     def _download():
-        client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
+        client = BambuFTPClient(
+            ip_address,
+            access_code,
+            timeout=socket_timeout,
+            printer_model=printer_model,
+            respect_handshake_cooloff=respect_handshake_cooloff,
+        )
         if not client.connect():
             return False
 
@@ -966,7 +1050,36 @@ async def download_file_try_paths_async(
         finally:
             client.disconnect()
 
-    return await loop.run_in_executor(None, _download)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP download_try_paths exceeded its %ss cap for %s", timeout, ip_address)
+        return False
+
+
+def _upload_deadline(local_path: Path) -> float:
+    """Derive an upload deadline from the source size."""
+    try:
+        size = local_path.stat().st_size
+    except OSError:
+        return _UPLOAD_MIN_TIMEOUT
+    return max(_UPLOAD_MIN_TIMEOUT, size / _UPLOAD_FLOOR_BYTES_PER_SEC)
+
+
+# One STOR at a time per printer. Concurrent transfers can corrupt the same
+# remote path and make an otherwise healthy printer appear unreliable.
+_upload_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _upload_lock(loop: asyncio.AbstractEventLoop, ip_address: str) -> asyncio.Lock:
+    per_loop = _upload_locks.setdefault(loop, {})
+    lock = per_loop.get(ip_address)
+    if lock is None:
+        lock = asyncio.Lock()
+        per_loop[ip_address] = lock
+    return lock
 
 
 async def upload_file_async(
@@ -974,10 +1087,11 @@ async def upload_file_async(
     access_code: str,
     local_path: Path,
     remote_path: str,
-    timeout: float = 600.0,
+    timeout: float | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    respect_handshake_cooloff: bool = True,
 ) -> bool:
     """Async wrapper for uploading a file with timeout and progress callback.
 
@@ -989,27 +1103,41 @@ async def upload_file_async(
         access_code: Printer access code
         local_path: Local file path to upload
         remote_path: Remote path on printer
-        timeout: Overall operation timeout (asyncio)
+        timeout: Overall deadline. ``None`` derives it from the source size;
+            an explicit value is used unchanged.
         progress_callback: Optional callback for progress updates
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
     """
     loop = asyncio.get_event_loop()
     is_a1 = printer_model in BambuFTPClient.A1_MODELS if printer_model else False
+    deadline = _upload_deadline(local_path) if timeout is None else timeout
+    cancel = threading.Event()
+
+    def _guarded_progress(uploaded: int, total: int) -> None:
+        if cancel.is_set():
+            raise UploadCancelled(f"upload of {remote_path} exceeded its {deadline:.0f}s deadline")
+        if progress_callback:
+            progress_callback(uploaded, total)
 
     def _upload(force_prot_c: bool = False) -> bool:
         mode_str = "prot_c" if force_prot_c else "prot_p"
         logger.info(
             f"FTP connecting to {ip_address} for upload (model={printer_model}, "
-            f"mode={mode_str}, socket_timeout={socket_timeout}s)..."
+            f"mode={mode_str}, socket_timeout={socket_timeout}s, deadline={deadline:.0f}s)..."
         )
         client = BambuFTPClient(
-            ip_address, access_code, timeout=socket_timeout, printer_model=printer_model, force_prot_c=force_prot_c
+            ip_address,
+            access_code,
+            timeout=socket_timeout,
+            printer_model=printer_model,
+            force_prot_c=force_prot_c,
+            respect_handshake_cooloff=respect_handshake_cooloff,
         )
         if client.connect():
             logger.info("FTP connected to %s", ip_address)
             try:
-                result = client.upload_file(local_path, remote_path, progress_callback)
+                result = client.upload_file(local_path, remote_path, _guarded_progress)
                 if result:
                     # Cache the working mode
                     BambuFTPClient.cache_mode(ip_address, mode_str)
@@ -1019,32 +1147,61 @@ async def upload_file_async(
         logger.warning("FTP connection failed to %s", ip_address)
         return False
 
-    try:
+    async def _attempt(force_prot_c: bool) -> bool:
+        """Run one worker attempt and cooperatively stop it on timeout."""
+        fut = loop.run_in_executor(None, lambda: _upload(force_prot_c))
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=deadline)
+        except TimeoutError:
+            cancel.set()
+            logger.warning(
+                "FTP upload of %s exceeded its %.0fs deadline — cancelling the transfer",
+                remote_path,
+                deadline,
+            )
+            try:
+                await asyncio.wait_for(asyncio.shield(fut), timeout=_UPLOAD_CANCEL_GRACE)
+            except UploadCancelled:
+                logger.info("FTP upload of %s cancelled; partial file removed from the printer", remote_path)
+            except TimeoutError:
+                logger.error(
+                    "FTP upload thread for %s did not stop within %.0fs of the cancel signal",
+                    remote_path,
+                    _UPLOAD_CANCEL_GRACE,
+                )
+                fut.add_done_callback(_swallow_future_result)
+            except Exception as e:
+                logger.warning("FTP upload of %s errored while cancelling: %s", remote_path, e)
+            raise UploadCancelled(
+                f"Upload of {remote_path} to {ip_address} exceeded its {deadline:.0f}s deadline "
+                f"(link sustained less than {_UPLOAD_FLOOR_BYTES_PER_SEC // 1024} KB/s)"
+            ) from None
+
+    async with _upload_lock(loop, ip_address):
         # Check if we have a cached mode for this printer
         cached_mode = BambuFTPClient._mode_cache.get(ip_address)
 
         if cached_mode:
             # Use cached mode
             force_prot_c = cached_mode == "prot_c"
-            return await asyncio.wait_for(loop.run_in_executor(None, lambda: _upload(force_prot_c)), timeout=timeout)
+            return await _attempt(force_prot_c)
 
         # No cached mode - try prot_p first
-        result = await asyncio.wait_for(loop.run_in_executor(None, lambda: _upload(False)), timeout=timeout)
-
-        if result:
+        if await _attempt(False):
             return True
 
         # Upload failed - for A1 models, try prot_c fallback
         if is_a1:
             logger.info("FTP upload failed with prot_p for A1 model, trying prot_c fallback...")
-            result = await asyncio.wait_for(loop.run_in_executor(None, lambda: _upload(True)), timeout=timeout)
-            return result
+            return await _attempt(True)
 
         return False
 
-    except TimeoutError:
-        logger.warning("FTP upload timed out after %ss for %s", timeout, remote_path)
-        return False
+
+def _swallow_future_result(fut: asyncio.Future) -> None:
+    """Retrieve a late worker exception so asyncio does not log it as unhandled."""
+    if not fut.cancelled():
+        fut.exception()
 
 
 async def list_files_async(
@@ -1054,6 +1211,7 @@ async def list_files_async(
     timeout: float = 30.0,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    respect_handshake_cooloff: bool = True,
 ) -> list[dict]:
     """Async wrapper for listing files with timeout.
 
@@ -1064,7 +1222,13 @@ async def list_files_async(
     loop = asyncio.get_event_loop()
 
     def _list():
-        client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
+        client = BambuFTPClient(
+            ip_address,
+            access_code,
+            timeout=socket_timeout,
+            printer_model=printer_model,
+            respect_handshake_cooloff=respect_handshake_cooloff,
+        )
         if client.connect():
             try:
                 return client.list_files(path)
@@ -1085,6 +1249,8 @@ async def delete_file_async(
     remote_path: str,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 60.0,
+    respect_handshake_cooloff: bool = True,
 ) -> DeleteResult:
     """Async wrapper for deleting a file.
 
@@ -1095,11 +1261,18 @@ async def delete_file_async(
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall async cap, including time waiting for an executor slot
     """
     loop = asyncio.get_event_loop()
 
     def _delete() -> DeleteResult:
-        client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
+        client = BambuFTPClient(
+            ip_address,
+            access_code,
+            timeout=socket_timeout,
+            printer_model=printer_model,
+            respect_handshake_cooloff=respect_handshake_cooloff,
+        )
         if client.connect():
             try:
                 return client.delete_file(remote_path)
@@ -1107,7 +1280,11 @@ async def delete_file_async(
                 client.disconnect()
         return DeleteResult.FAILED
 
-    return await loop.run_in_executor(None, _delete)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _delete), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP delete_file exceeded its %ss cap for %s", timeout, ip_address)
+        return DeleteResult.FAILED
 
 
 async def download_file_bytes_async(
@@ -1116,17 +1293,26 @@ async def download_file_bytes_async(
     remote_path: str,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 300.0,
+    respect_handshake_cooloff: bool = True,
 ) -> bytes | None:
     """Async wrapper for downloading file as bytes.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall async cap, including time waiting for an executor slot
     """
     loop = asyncio.get_event_loop()
 
     def _download():
-        client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
+        client = BambuFTPClient(
+            ip_address,
+            access_code,
+            timeout=socket_timeout,
+            printer_model=printer_model,
+            respect_handshake_cooloff=respect_handshake_cooloff,
+        )
         if client.connect():
             try:
                 return client.download_file(remote_path)
@@ -1134,7 +1320,11 @@ async def download_file_bytes_async(
                 client.disconnect()
         return None
 
-    return await loop.run_in_executor(None, _download)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP download_bytes exceeded its %ss cap for %s", timeout, ip_address)
+        return None
 
 
 async def get_storage_info_async(
@@ -1142,17 +1332,26 @@ async def get_storage_info_async(
     access_code: str,
     socket_timeout: float | None = None,
     printer_model: str | None = None,
+    timeout: float = 60.0,
+    respect_handshake_cooloff: bool = True,
 ) -> dict | None:
     """Async wrapper for getting storage info.
 
     Args:
         socket_timeout: FTP socket timeout for slow connections (e.g., A1 printers)
         printer_model: Printer model for A1-specific workarounds
+        timeout: overall async cap, including time waiting for an executor slot
     """
     loop = asyncio.get_event_loop()
 
     def _get_storage():
-        client = BambuFTPClient(ip_address, access_code, timeout=socket_timeout, printer_model=printer_model)
+        client = BambuFTPClient(
+            ip_address,
+            access_code,
+            timeout=socket_timeout,
+            printer_model=printer_model,
+            respect_handshake_cooloff=respect_handshake_cooloff,
+        )
         if client.connect():
             try:
                 return client.get_storage_info()
@@ -1160,7 +1359,11 @@ async def get_storage_info_async(
                 client.disconnect()
         return None
 
-    return await loop.run_in_executor(None, _get_storage)
+    try:
+        return await asyncio.wait_for(loop.run_in_executor(None, _get_storage), timeout=timeout)
+    except TimeoutError:
+        logger.warning("FTP get_storage_info exceeded its %ss cap for %s", timeout, ip_address)
+        return None
 
 
 async def get_ftp_retry_settings() -> tuple[bool, int, float, float]:
@@ -1187,6 +1390,7 @@ async def with_ftp_retry(
     retry_delay: float = 2.0,
     operation_name: str = "FTP operation",
     non_retry_exceptions: tuple[type[BaseException], ...] = (),
+    cooloff_ip: str | None = None,
     **kwargs,
 ) -> T | None:
     """Execute FTP operation with retry logic.
@@ -1204,8 +1408,10 @@ async def with_ftp_retry(
         Result of the operation, or None if all attempts fail
     """
     last_error = None
+    attempts_made = 0
 
     for attempt in range(max_retries + 1):
+        attempts_made = attempt + 1
         try:
             result = await operation(*args, **kwargs)
             # Check for "falsy" success indicators
@@ -1216,6 +1422,10 @@ async def with_ftp_retry(
             # Operation returned failure indicator
             if attempt > 0:
                 logger.info("%s attempt %s/%s returned failure", operation_name, attempt + 1, max_retries + 1)
+        except UploadCancelled:
+            # A deadline expiry already stopped the worker. Retrying would
+            # start another STOR after the link has proven too slow.
+            raise
         except Exception as e:
             if non_retry_exceptions and isinstance(e, non_retry_exceptions):
                 raise
@@ -1224,10 +1434,19 @@ async def with_ftp_retry(
 
         # Don't wait after the last attempt
         if attempt < max_retries:
+            if cooloff_ip and ftps_handshake_blocked(cooloff_ip):
+                logger.warning(
+                    "%s: stopping after attempt %s/%s because %s is in FTPS handshake cooldown",
+                    operation_name,
+                    attempt + 1,
+                    max_retries + 1,
+                    cooloff_ip,
+                )
+                break
             logger.info("%s will retry in %ss...", operation_name, retry_delay)
             await asyncio.sleep(retry_delay)
 
-    logger.error("%s failed after %s attempts", operation_name, max_retries + 1)
+    logger.error("%s failed after %s attempts", operation_name, attempts_made)
     if last_error:
         logger.debug("Last error: %s", last_error)
     return None

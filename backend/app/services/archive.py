@@ -99,6 +99,29 @@ def peek_plate_index_in_3mf(file_path: Path) -> int | None:
     return None
 
 
+def plate_indexes_in_3mf(file_path: Path) -> list[int | None]:
+    """Return every plate index declared by a 3MF, preserving file order."""
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/slice_info.config" not in zf.namelist():
+                return []
+            root = ET.fromstring(zf.read("Metadata/slice_info.config").decode())
+            indexes: list[int | None] = []
+            for plate in root.findall(".//plate"):
+                value = None
+                for meta in plate.findall("metadata"):
+                    if meta.get("key") == "index":
+                        try:
+                            value = int(meta.get("value", ""))
+                        except ValueError:
+                            pass
+                        break
+                indexes.append(value)
+            return indexes
+    except Exception:
+        return []
+
+
 _PLATE_SUFFIX_RE = re.compile(r"^(.*?)(\s*-\s*Plate\s+|_plate_)(\d+)$", re.IGNORECASE)
 
 
@@ -967,7 +990,7 @@ async def _count_related_queue_items(db: AsyncSession, archive_id: int) -> tuple
             .select_from(PrintQueueItem)
             .where(
                 PrintQueueItem.archive_id == archive_id,
-                PrintQueueItem.status.in_(["dispatching", "printing"]),
+                PrintQueueItem.status.in_(["preheating", "dispatching", "printing"]),
             )
         )
     ).scalar_one()

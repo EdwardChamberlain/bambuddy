@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "Hazne ön ısıtma",
+    temperature: "Hedef sıcaklık (°C)",
+    duration: "Bekletme süresi (dakika)",
+    status: "Ön ısıtılıyor",
+    hint: "30–60°C, 1–120 dakika. Zamanlayıcı, ısıtma komutu gönderildiğinde başlar.",
+    bedOnly: "!! Bu makinede hazne ısıtıcısı yok. Isıtma yalnızca tabla ile yapılacaktır.",
+    remaining: 'Kalan: {{time}}',
+    waitingForConfirmation: 'Isıtıcı onayı bekleniyor',
+    skip: 'Hazne ön ısıtmasını atla',
+    skipped: 'Hazne ön ısıtması atlandı',
+    skipFailed: 'Hazne ön ısıtması atlanamadı',
+  },
   // Navigasyon
   nav: {
     printers: 'Yazıcılar',
@@ -2101,6 +2114,8 @@ export default {
     slicerCard: 'Dilimleyici',
     orcaslicerApiUrl: 'OrcaSlicer yardımcı bileşen URL',
     bambuStudioApiUrl: 'Bambu Studio yardımcı bileşen URL',
+    slicerStallTimeout: 'Dilimleyici duraklama zaman asimi (dakika)',
+    slicerStallTimeoutDescription: 'Sidecar bu sure boyunca ilerleme bildirmezse dilimleme iptal edilir. Ilerleme bildirmeye devam eden agir modeller ne kadar surerse sursun kesilmez. Ilerleme bildirmeyen sidecar surumleri bu degeri toplam sure siniri olarak kullanir.',
     slicerApiUrlDescription: 'Dilimleyici-API yardımcı bileşen konteynerinin URL\'si. SLICER_API_URL / BAMBU_STUDIO_API_URL ortam değişkeni varsayılanlarını kullanmak için boş bırakın.',
     slicerBundlesRemoved: {
       title: 'Dilimleyici Paketleri (kaldırıldı)',

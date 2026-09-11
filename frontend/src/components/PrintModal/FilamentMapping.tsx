@@ -190,6 +190,7 @@ export function FilamentMapping({
       <button
         type="button"
         onClick={() => setIsExpanded(!isExpanded)}
+        aria-expanded={isExpanded}
         className="flex items-center gap-2 text-sm text-bambu-gray hover:text-white transition-colors w-full"
       >
         <Circle className="w-4 h-4" fill={statusColor} stroke="none" />

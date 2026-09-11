@@ -5,10 +5,11 @@ import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.app.core import database
 from backend.app.core.auth import (
     RequireCameraStreamTokenIfAuthEnabled,
     RequirePermissionIfAuthEnabled,
@@ -407,6 +408,24 @@ async def delete_printer(
     if not printer:
         raise HTTPException(404, "Printer not found")
 
+    active_preheat = await db.scalar(
+        select(PrintQueueItem.id)
+        .where(
+            PrintQueueItem.printer_id == printer_id,
+            or_(
+                PrintQueueItem.status == "preheating",
+                and_(
+                    PrintQueueItem.status == "dispatching",
+                    PrintQueueItem.chamber_heat_soak.is_(True),
+                    PrintQueueItem.dispatch_subtask_id.is_(None),
+                ),
+            ),
+        )
+        .limit(1)
+    )
+    if active_preheat or printer.heat_soak_shutdown_pending:
+        raise HTTPException(409, "Stop chamber heat soak and wait for heater shutdown before deleting this printer")
+
     printer_manager.disconnect_printer(printer_id)
 
     if delete_archives:
@@ -740,11 +759,18 @@ async def get_printer_status(
         select(User.username)
         .join(PrintQueueItem, PrintQueueItem.created_by_id == User.id)
         .where(PrintQueueItem.printer_id == printer_id)
-        .where(PrintQueueItem.status.in_(["dispatching", "printing"]))
+        .where(PrintQueueItem.status.in_(["preheating", "dispatching", "printing"]))
         .order_by(PrintQueueItem.position, PrintQueueItem.id)
         .limit(1)
     )
     current_queue_owner = current_queue_owner_result.scalar_one_or_none()
+    preheating = bool(
+        await db.scalar(
+            select(PrintQueueItem.id)
+            .where(PrintQueueItem.printer_id == printer_id, PrintQueueItem.status == "preheating")
+            .limit(1)
+        )
+    )
 
     # Resolve the exact terminal print holding the plate-clear gate. Do not use
     # the regular archives listing here: that endpoint is intentionally scoped
@@ -808,6 +834,7 @@ async def get_printer_status(
         stg_cur_name=get_derived_status_name(state, printer.model),
         stg=state.stg,
         airduct_mode=state.airduct_mode,
+        preheating=preheating,
         speed_level=state.speed_level,
         chamber_light=state.chamber_light,
         active_extruder=state.active_extruder,
@@ -1250,18 +1277,24 @@ async def get_printer_cover(
 # ============================================
 
 
+async def _load_printer_or_404(printer_id: int) -> Printer:
+    """Load a printer, then release the DB connection before network I/O."""
+    async with database.async_session() as db:
+        result = await db.execute(select(Printer).where(Printer.id == printer_id))
+        printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+    return printer
+
+
 @router.get("/{printer_id}/files")
 async def list_printer_files(
     printer_id: int,
     path: str = "/",
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """List files on the printer at the specified path."""
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     files = await list_files_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
 
@@ -1280,13 +1313,9 @@ async def download_printer_file(
     printer_id: int,
     path: str,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """Download a file from the printer."""
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     data = await download_file_bytes_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
     if data is None:
@@ -1321,16 +1350,11 @@ async def get_printer_file_gcode(
     printer_id: int,
     path: str,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get gcode for a file stored on a printer (for preview)."""
     import io
 
-    # Validate printer
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     data = await download_file_bytes_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
     if data is None:
@@ -1360,7 +1384,6 @@ async def get_printer_file_plates(
     printer_id: int,
     path: str = Query(..., description="Full path to the 3MF file on the printer"),
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get available plates from a multi-plate 3MF file stored on a printer."""
     import io
@@ -1368,11 +1391,7 @@ async def get_printer_file_plates(
 
     import defusedxml.ElementTree as ET
 
-    # Validate printer
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     filename = path.split("/")[-1]
     if not filename.lower().endswith(".3mf"):
@@ -1605,15 +1624,11 @@ async def get_printer_file_plate_thumbnail(
     plate_index: int,
     path: str = Query(..., description="Full path to the 3MF file on the printer"),
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get a plate thumbnail image from a printer-stored 3MF file."""
     import io
 
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     data = await download_file_bytes_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
     if data is None:
@@ -1636,7 +1651,6 @@ async def download_printer_files_as_zip(
     printer_id: int,
     request: dict,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """Download multiple files from the printer as a ZIP archive."""
     import io
@@ -1645,10 +1659,7 @@ async def download_printer_files_as_zip(
     if not paths:
         raise HTTPException(400, "No files specified")
 
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
@@ -1683,13 +1694,9 @@ async def delete_printer_file(
     printer_id: int,
     path: str,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
-    db: AsyncSession = Depends(get_db),
 ):
     """Delete a file from the printer."""
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     from backend.app.services.bambu_ftp import DeleteResult
 
@@ -1706,13 +1713,9 @@ async def delete_printer_file(
 async def get_printer_storage(
     printer_id: int,
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_READ),
-    db: AsyncSession = Depends(get_db),
 ):
     """Get storage information from the printer."""
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(404, "Printer not found")
+    printer = await _load_printer_or_404(printer_id)
 
     storage_info = await get_storage_info_async(printer.ip_address, printer.access_code, printer_model=printer.model)
 

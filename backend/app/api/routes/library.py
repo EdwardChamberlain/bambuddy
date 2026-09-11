@@ -21,13 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.api.routes.cloud import resolve_api_key_cloud_owner
+from backend.app.core import database
 from backend.app.core.auth import (
     RequireCameraStreamTokenIfAuthEnabled,
     require_ownership_permission,
     require_permission_if_auth_enabled,
+    resolve_api_key_owner,
 )
 from backend.app.core.config import settings as app_settings
-from backend.app.core.database import async_session, get_db
+from backend.app.core.database import get_db
 from backend.app.core.permissions import Permission
 from backend.app.core.tasks import spawn_background_task
 from backend.app.models.archive import PrintArchive
@@ -662,6 +664,15 @@ def create_image_thumbnail(file_path: Path, thumbnails_dir: Path, max_size: int 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 
 
+def _external_stl_needs_backfill(file_path: str | None) -> bool:
+    """Return whether an external STL is large enough for thumbnail work."""
+    try:
+        path = to_absolute_path(file_path)
+        return path is not None and path.stat().st_size >= MIN_USABLE_STL_BYTES
+    except (OSError, ValueError):
+        return False
+
+
 async def _backfill_external_stl_thumbnails(folder_ids: list[int]) -> None:
     """Generate STL thumbnails for an external folder tree in the background.
 
@@ -681,7 +692,7 @@ async def _backfill_external_stl_thumbnails(folder_ids: list[int]) -> None:
     if not folder_ids:
         return
     thumbnails_dir = get_library_thumbnails_dir()
-    async with async_session() as db:
+    async with database.async_session() as db:
         result = await db.execute(
             LibraryFile.active().where(
                 LibraryFile.folder_id.in_(folder_ids),
@@ -1263,13 +1274,30 @@ async def delete_folder(
 
         return file_ids
 
-    await get_all_file_ids(folder_id)
+    doomed_file_ids = await get_all_file_ids(folder_id)
+    from backend.app.services.library_trash import release_queue_references
+
+    await release_queue_references(db, doomed_file_ids)
 
     # Delete folder (cascade will handle files and subfolders)
     await db.delete(folder)
     await db.commit()
 
     return {"status": "success", "message": "Folder deleted"}
+
+
+async def _collect_descendant_file_ids(db: AsyncSession, folder_id: int) -> list[int]:
+    """Return every file ID below a folder, including nested subfolders."""
+    folder_ids = {folder_id}
+    pending = [folder_id]
+    while pending:
+        result = await db.execute(select(LibraryFolder.id).where(LibraryFolder.parent_id.in_(pending)))
+        children = [child_id for (child_id,) in result.all() if child_id not in folder_ids]
+        folder_ids.update(children)
+        pending = children
+
+    result = await db.execute(select(LibraryFile.id).where(LibraryFile.folder_id.in_(folder_ids)))
+    return [file_id for (file_id,) in result.all()]
 
 
 # ============ External Folder Endpoints ============
@@ -1538,6 +1566,16 @@ async def scan_external_folder(
         )
     )
     existing_files = {f.file_path: f for f in existing_result.scalars().all()}
+    stl_backfill_folder_ids = {
+        file.folder_id
+        for file in existing_files.values()
+        if (
+            file.folder_id is not None
+            and file.file_type == "stl"
+            and file.thumbnail_path is None
+            and _external_stl_needs_backfill(file.file_path)
+        )
+    }
 
     # Build folder cache: relative path -> folder_id (for resolving subfolders)
     # Pre-populate with existing child folders keyed by their external_path
@@ -1646,6 +1684,8 @@ async def scan_external_folder(
                 continue
 
             file_type = classify_file_type(filename)
+            if file_type == "stl" and _external_stl_needs_backfill(file_path_str):
+                stl_backfill_folder_ids.add(target_folder_id)
 
             # Extract thumbnail for 3mf files (including .gcode.3mf sliced
             # outputs — those are 3MF zips on disk and carry the same
@@ -1765,18 +1805,19 @@ async def scan_external_folder(
 
     await db.commit()
 
-    # Spawn STL thumbnail backfill in the background — the scan endpoint
+    # Spawn STL thumbnail backfill in the background when there is usable STL
+    # work to do — the scan endpoint
     # returns immediately so the FE modal closes and subdirectories are
     # visible right away; thumbnails fill in over the following seconds /
     # minutes as the task processes each STL file. Survives FE refresh —
     # the task lives in the FastAPI event loop, not the request scope.
-    # folder_cache.values() covers the root + every pre-existing subfolder
-    # + every subfolder created during this scan. all_folder_ids on its own
-    # would miss the newly-created ones (it's snapshotted before the walk).
-    spawn_background_task(
-        _backfill_external_stl_thumbnails(list(set(folder_cache.values()))),
-        name=f"stl-backfill-folder-{folder_id}",
-    )
+    # stl_backfill_folder_ids includes both existing unthumbnailed STL rows and
+    # newly discovered usable STL files, including files in new subfolders.
+    if stl_backfill_folder_ids:
+        spawn_background_task(
+            _backfill_external_stl_thumbnails(sorted(stl_backfill_folder_ids)),
+            name=f"stl-backfill-folder-{folder_id}",
+        )
 
     return {"status": "success", "added": added, "removed": removed}
 
@@ -1942,6 +1983,7 @@ async def upload_file(
     generate_stl_thumbnails: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_UPLOAD)),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Upload a file to the library."""
     try:
@@ -2081,7 +2123,7 @@ async def upload_file(
             file_hash=file_hash,
             thumbnail_path=to_relative_path(thumbnail_path) if thumbnail_path else None,
             file_metadata=_without_print_name(metadata) if metadata else None,
-            created_by_id=current_user.id if current_user else None,
+            created_by_id=(current_user or api_key_owner).id if (current_user or api_key_owner) else None,
         )
         db.add(library_file)
         await db.commit()
@@ -2112,6 +2154,7 @@ async def extract_zip_file(
     generate_stl_thumbnails: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_UPLOAD)),
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
 ):
     """Upload and extract a ZIP file to the library.
 
@@ -2344,7 +2387,7 @@ async def extract_zip_file(
                         file_hash=file_hash,
                         thumbnail_path=to_relative_path(thumbnail_path) if thumbnail_path else None,
                         file_metadata=_without_print_name(metadata) if metadata else None,
-                        created_by_id=current_user.id if current_user else None,
+                        created_by_id=(current_user or api_key_owner).id if (current_user or api_key_owner) else None,
                     )
                     db.add(library_file)
                     await db.flush()
@@ -2932,6 +2975,7 @@ async def _try_preview_slice_filaments(
     """
     from backend.app.api.routes.settings import get_setting
     from backend.app.services.slice_preview import get_preview_filaments
+    from backend.app.services.slicer_api import get_stall_timeout_seconds
 
     preferred = (await get_setting(db, "preferred_slicer")) or "bambu_studio"
     if preferred == "orcaslicer":
@@ -2957,6 +3001,7 @@ async def _try_preview_slice_filaments(
         file_name=file_path.name,
         api_url=api_url,
         request_id=request_id,
+        timeout_seconds=await get_stall_timeout_seconds(db),
     )
 
 
@@ -3302,6 +3347,22 @@ def _patch_process_bed_type(process_json: str, bed_type: str) -> str:
 # evaluate the job at all.
 _SLICER_REJECTION_MARKER = "Slicing failed with error from slicer:"
 
+# The CLI writes its real diagnostic to stdout/stderr on the `[error]` level.
+# Format is `[<timestamp>] [error] run <NNNN>: <message>` (or sometimes without
+# the `run NNNN:` prefix). The bracketed timestamp is optional; the `[error]`
+# tag is what we anchor on. Used to recover the actual rejection reason for
+# the `error_string: "The input preset file is invalid and can not be parsed."`
+# case (#1851) — the CLI emits that generic placeholder for every -5 exit
+# including real preset-compat rejections, and the per-incident specifics
+# only live in the stdout dump.
+_CLI_ERROR_LINE_RE = re.compile(r"\[error\]\s*(?:run\s+\d+:\s*)?(.+?)\s*$", re.MULTILINE)
+
+# The placeholder error_string Bambu Studio writes to result.json for any
+# `--load-settings` parse / compat rejection (-5 exit). When the sidecar
+# surfaces this, the real reason lives in the stdout `[error]` line that we
+# mine via _CLI_ERROR_LINE_RE.
+_INPUT_PRESET_INVALID_PLACEHOLDER = "The input preset file is invalid and can not be parsed."
+
 
 def _slicer_rejection_message(error_text: str) -> str | None:
     """Extract the slicer's own rejection reason from a sidecar error string,
@@ -3312,16 +3373,34 @@ def _slicer_rejection_message(error_text: str) -> str | None:
     no. Retrying with the 3MF's embedded settings would then only "succeed"
     by silently reverting to the source file's original printer, masking the
     real problem; such failures must reach the user instead.
+
+    When the sidecar's `error_string` is Bambu Studio's generic
+    "The input preset file is invalid and can not be parsed." placeholder
+    (#1851) — emitted for every -5 exit, including the actual preset-compat
+    rejections whose real reason is logged to stdout as
+    `[error] run NNNN: <diagnostic>` — prefer the stdout `[error]` line so
+    the user sees which preset clashed with which printer.
     """
     if _SLICER_REJECTION_MARKER not in error_text:
         return None
     reason = error_text.split(_SLICER_REJECTION_MARKER, 1)[1]
+    # Mine the stdout/stderr dump for a more specific CLI diagnostic before
+    # we trim it off below. Done first so the lookup window covers the full
+    # response, not just the headline.
+    cli_diagnostic_match = _CLI_ERROR_LINE_RE.search(reason)
+    cli_diagnostic = cli_diagnostic_match.group(1).strip() if cli_diagnostic_match else None
     # Trim the sidecar's trailing exit-code note and any stderr/stdout dump.
     for cut in (": Slicer process failed", "\nstderr:", "\nstdout:"):
         idx = reason.find(cut)
         if idx != -1:
             reason = reason[:idx]
-    return reason.strip() or None
+    reason = reason.strip() or None
+    # When the headline is Bambu Studio's catch-all placeholder, the real
+    # reason is in the stdout `[error]` line. Substitute it. The placeholder
+    # by itself tells the user nothing about why their slice was rejected.
+    if cli_diagnostic and (reason is None or reason == _INPUT_PRESET_INVALID_PLACEHOLDER):
+        return cli_diagnostic
+    return reason
 
 
 async def _run_slicer_with_fallback(
@@ -3352,10 +3431,13 @@ async def _run_slicer_with_fallback(
     from backend.app.api.routes.settings import get_setting
     from backend.app.services.preset_resolver import resolve_preset_ref
     from backend.app.services.slicer_api import (
+        SlicerApiOutputError,
         SlicerApiServerError,
         SlicerApiService,
         SlicerApiUnavailableError,
         SlicerInputError,
+        SlicerTimeoutError,
+        get_stall_timeout_seconds,
     )
 
     user: User | None = None
@@ -3436,7 +3518,7 @@ async def _run_slicer_with_fallback(
         primary_bytes = _sanitize_project_settings_sentinels(primary_bytes)
 
     used_embedded_settings = False
-    service = SlicerApiService(api_url)
+    service = SlicerApiService(api_url, timeout_seconds=await get_stall_timeout_seconds(db))
 
     # #1493: cross-nozzle-class re-slice (single <-> dual). Without
     # intervention the slicer rejects with either "G-code in unprintable
@@ -3492,9 +3574,11 @@ async def _run_slicer_with_fallback(
     # (e.g. ABS in slot 2 next to a PLA in the used slot 1) makes
     # BambuStudio reject the slice with "the temperature difference of
     # the filaments used is too large" (exit 194) even though the G-code
-    # never touches the unused slot. Replace unused-slot entries with the
-    # slot-1 selection before the real slice so the loaded-filament set
-    # is materially homogeneous.
+    # never touches the unused slot; a default scoped to another printer
+    # gets it rejected with "filament preset (slot N) is not compatible
+    # with printer …" (#2628). Replace unused-slot entries with the
+    # plate's lowest used slot before the real slice so the loaded set is
+    # materially homogeneous and printer-correct.
     if is_3mf and request.plate is not None:
         from backend.app.services.slicer_3mf_convert import substitute_unused_plate_filaments
 
@@ -3606,6 +3690,11 @@ async def _run_slicer_with_fallback(
                     request_id=progress_request_id,
                     on_progress=progress_callback,
                 )
+        except SlicerApiOutputError:
+            # A 2xx response with a corrupt/incomplete 3MF is not a CLI crash.
+            # Do not retry with embedded settings: that could silently switch
+            # back to the source printer/process and defeat output validation.
+            raise
         except SlicerApiServerError as exc:
             rejection = _slicer_rejection_message(str(exc))
             if rejection:
@@ -3646,6 +3735,8 @@ async def _run_slicer_with_fallback(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except SlicerApiUnavailableError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except SlicerTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     finally:
         await service.close()
 
@@ -4027,6 +4118,12 @@ async def slice_library_file(
     request: SliceRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_UPLOAD)),
+    auth_result: tuple[User | None, bool] = Depends(
+        require_ownership_permission(
+            Permission.LIBRARY_READ_ALL,
+            Permission.LIBRARY_READ_OWN,
+        )
+    ),
     api_key_cloud_owner: User | None = Depends(resolve_api_key_cloud_owner),
 ):
     """Enqueue a slice job for a library file. Returns 202 + job_id; the
@@ -4040,8 +4137,14 @@ async def slice_library_file(
 
     src_result = await db.execute(LibraryFile.active().where(LibraryFile.id == file_id))
     lib_file = src_result.scalar_one_or_none()
-    if not lib_file:
-        raise HTTPException(status_code=404, detail="File not found")
+    # Per-row ownership gate. LIBRARY_UPLOAD alone let a READ_OWN caller (e.g. the
+    # built-in Operators group) slice another user's model by raw id even though
+    # GET on that id returned 404 — the sliced output was then attributed to and
+    # downloadable by the requester. Enforce the same visibility the read routes
+    # use before reading the source off disk. The ownership dependency also
+    # resolves an API-key owner instead of treating a key as an all-row caller.
+    owner_user, can_read_all = auth_result
+    lib_file = _ensure_library_file_visible(lib_file, owner_user, can_read_all)
 
     src_lower = (lib_file.filename or "").lower()
     if not (
@@ -4065,7 +4168,7 @@ async def slice_library_file(
     # behaviour to avoid a wider scope expansion). Fall back to the API
     # key's owner so cloud-preset resolution can read the stored
     # cloud_token (#1182 follow-up).
-    cloud_token_user = current_user or api_key_cloud_owner
+    cloud_token_user = current_user or owner_user or api_key_cloud_owner
     user_id = cloud_token_user.id if cloud_token_user else None
 
     # If the source has a `print_name` in its metadata (BambuStudio always
@@ -4113,6 +4216,7 @@ async def slice_library_file(
         kind="library_file",
         source_id=lib_file.id,
         source_name=lib_file.filename,
+        owner_id=user_id,
         run=_run,
     )
     return {
@@ -4354,6 +4458,9 @@ async def delete_file(
                 abs_thumb_path.unlink()
             except OSError as e:
                 logger.warning("Failed to delete thumbnail from disk: %s", e)
+        from backend.app.services.library_trash import release_queue_references
+
+        await release_queue_references(db, [file.id])
         await db.delete(file)
         await db.commit()
         return {"status": "success", "message": "File deleted", "trashed": False}
@@ -4678,6 +4785,9 @@ async def bulk_delete(
                     abs_thumb_path.unlink()
                 except OSError as e:
                     logger.warning("Failed to delete thumbnail from disk: %s", e)
+            from backend.app.services.library_trash import release_queue_references
+
+            await release_queue_references(db, [file.id])
             await db.delete(file)
         else:
             file.deleted_at = now
@@ -4693,14 +4803,20 @@ async def bulk_delete(
         result = await db.execute(select(LibraryFolder).where(LibraryFolder.id == folder_id))
         folder = result.scalar_one_or_none()
         if folder:
-            # Count files that will be deleted
+            # Count files that will be deleted, including files in nested
+            # subfolders. Queue references must be released before the folder
+            # cascade runs or ON DELETE CASCADE will silently remove queued
+            # items instead of cancelling/detaching them.
+            folder_file_ids = await _collect_descendant_file_ids(db, folder_id)
             file_count_result = await db.execute(
-                select(func.count(LibraryFile.id)).where(
-                    LibraryFile.folder_id == folder_id,
-                    LibraryFile.deleted_at.is_(None),
-                )
+                select(func.count(LibraryFile.id))
+                .where(LibraryFile.id.in_(folder_file_ids))
+                .where(LibraryFile.deleted_at.is_(None))
             )
             deleted_files += file_count_result.scalar() or 0
+            from backend.app.services.library_trash import release_queue_references
+
+            await release_queue_references(db, folder_file_ids)
             await db.delete(folder)
             deleted_folders += 1
 

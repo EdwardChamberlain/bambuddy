@@ -138,6 +138,9 @@ describe('QueuePage', () => {
       http.post('/api/v1/queue/:id/stop', () => {
         return HttpResponse.json({ success: true });
       }),
+      http.post('/api/v1/queue/:id/skip-heat-soak', () => {
+        return HttpResponse.json({ message: 'Heat soak skipped' });
+      }),
       http.post('/api/v1/queue/reorder', () => {
         return HttpResponse.json({ success: true });
       })
@@ -231,6 +234,60 @@ describe('QueuePage', () => {
       const timelineItem = await screen.findByTestId('queue-timeline-item-4');
       expect(timelineItem).toHaveAttribute('data-status', 'dispatching');
       expect(timelineItem).toHaveTextContent('Dispatching');
+    });
+
+    it('counts preheating items as printing and excludes them from queued work', async () => {
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([
+          ...mockQueueItems,
+          {
+            ...mockQueueItems[0],
+            id: 4,
+            status: 'preheating',
+            archive_name: 'Warming chamber',
+            chamber_heat_soak: true,
+            heat_soak_minutes: 10,
+            preheat_started_at: new Date(Date.now() - 65_000).toISOString(),
+          },
+        ])),
+      );
+      render(<QueuePage />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Warming chamber')).toBeInTheDocument();
+        expect(screen.getByText('Preheating')).toBeInTheDocument();
+        expect(screen.getByTestId('queue-stat-printing')).toHaveTextContent(/2\s*Printing/);
+        expect(screen.getByTestId('queue-stat-queued')).toHaveTextContent(/1\s*Queued/);
+        expect(screen.getAllByTitle('Stop Print')).toHaveLength(2);
+        expect(screen.getByText(/Remaining: 8:\d{2}/)).toBeInTheDocument();
+        expect(screen.getByTitle('Skip heat soak')).toBeInTheDocument();
+      });
+    });
+
+    it('skips an active heat soak from the queue row', async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([
+          {
+            ...mockQueueItems[0],
+            id: 4,
+            status: 'preheating',
+            archive_name: 'Skip this soak',
+            chamber_heat_soak: true,
+            heat_soak_minutes: 10,
+            preheat_started_at: new Date().toISOString(),
+          },
+        ])),
+      );
+
+      render(<QueuePage />);
+
+      const skipButton = await screen.findByTitle('Skip heat soak');
+      await user.click(skipButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('Heat soak skipped')).toBeInTheDocument();
+      });
     });
 
     it('shows completed items in history', async () => {

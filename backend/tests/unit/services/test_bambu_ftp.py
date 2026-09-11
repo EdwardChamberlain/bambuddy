@@ -13,11 +13,14 @@ Tests against a real mock implicit FTPS server, covering:
 - Failure injection scenarios (regressions for 0.1.8 bugs)
 """
 
+import asyncio
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from backend.app.services import bambu_ftp
 from backend.app.services.bambu_ftp import (
     BambuFTPClient,
     FileNotOnPrinterError,
@@ -1422,3 +1425,130 @@ class TestThreeMFCache:
         assert archive_file.exists(), "archive 3mf must not be deleted by cache cleanup"
         assert library_file.exists(), "library 3mf must not be deleted by cache cleanup"
         assert not temp_file.exists(), "temp file should still be cleaned up"
+
+
+@pytest.fixture
+def slow_upload_client(monkeypatch):
+    """Fake a chunked worker so timeout and serialization are observable."""
+    state = {
+        "attempts": 0,
+        "active": 0,
+        "max_active": 0,
+        "completed": 0,
+        "cancelled": 0,
+    }
+    counter_lock = threading.Lock()
+
+    class FakeClient:
+        _mode_cache = {}
+        A1_MODELS = ("A1", "A1 Mini")
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            return True
+
+        def upload_file(self, local_path, remote_path, progress_callback=None):
+            with counter_lock:
+                state["attempts"] += 1
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            try:
+                for sent in range(1, 21):
+                    time.sleep(0.05)
+                    if progress_callback:
+                        try:
+                            progress_callback(sent, 20)
+                        except Exception:
+                            state["cancelled"] += 1
+                            raise
+                state["completed"] += 1
+                return True
+            finally:
+                with counter_lock:
+                    state["active"] -= 1
+
+        def disconnect(self):
+            pass
+
+        @staticmethod
+        def cache_mode(ip, mode):
+            pass
+
+    monkeypatch.setattr(bambu_ftp, "BambuFTPClient", FakeClient)
+    return state
+
+
+class TestUploadDeadlineAndSerialization:
+    def test_deadline_scales_with_source_size(self, tmp_path):
+        small = tmp_path / "small.3mf"
+        small.write_bytes(b"x")
+        assert bambu_ftp._upload_deadline(small) == bambu_ftp._UPLOAD_MIN_TIMEOUT
+
+        large = tmp_path / "large.3mf"
+        large.write_bytes(b"x" * (96 * 1024 * 1024))
+        assert bambu_ftp._upload_deadline(large) == pytest.approx(
+            large.stat().st_size / bambu_ftp._UPLOAD_FLOOR_BYTES_PER_SEC
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_cancels_worker_and_is_not_retried(self, tmp_path, slow_upload_client):
+        local = tmp_path / "slow.3mf"
+        local.write_bytes(b"x")
+
+        with pytest.raises(bambu_ftp.UploadCancelled):
+            await with_ftp_retry(
+                upload_file_async,
+                "127.0.0.1",
+                "12345678",
+                local,
+                "/slow.3mf",
+                timeout=0.2,
+                max_retries=3,
+                retry_delay=0,
+            )
+
+        assert slow_upload_client["attempts"] == 1
+        assert slow_upload_client["cancelled"] == 1
+        assert slow_upload_client["completed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_same_printer_uploads_are_serialized(self, tmp_path, slow_upload_client):
+        local = tmp_path / "queued.3mf"
+        local.write_bytes(b"x")
+
+        async def upload(name):
+            return await upload_file_async("127.0.0.1", "12345678", local, f"/{name}.3mf", timeout=5)
+
+        assert await asyncio.gather(upload("one"), upload("two")) == [True, True]
+        assert slow_upload_client["max_active"] == 1
+
+    @pytest.mark.asyncio
+    async def test_different_printers_can_upload_in_parallel(self, tmp_path, slow_upload_client):
+        local = tmp_path / "parallel.3mf"
+        local.write_bytes(b"x")
+
+        async def upload(ip):
+            return await upload_file_async(ip, "12345678", local, "/parallel.3mf", timeout=5)
+
+        assert await asyncio.gather(upload("127.0.0.1"), upload("127.0.0.2")) == [True, True]
+        assert slow_upload_client["max_active"] == 2
+
+    def test_progress_callback_cancellation_removes_partial_upload(self, ftp_client_factory, ftp_root, tmp_path):
+        client = ftp_client_factory()
+        assert client.connect() is True
+        try:
+            local = tmp_path / "cancelled.3mf"
+            local.write_bytes(b"x" * (BambuFTPClient.CHUNK_SIZE * 2))
+
+            def cancel(_uploaded, _total):
+                raise bambu_ftp.UploadCancelled("test cancellation")
+
+            with pytest.raises(bambu_ftp.UploadCancelled):
+                client.upload_file(local, "/cancelled.3mf", cancel)
+        finally:
+            client.disconnect()
+
+        time.sleep(_UPLOAD_FLUSH_DELAY)
+        assert not (Path(ftp_root) / "cancelled.3mf").exists()

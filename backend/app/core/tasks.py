@@ -55,6 +55,13 @@ def spawn_background_task(
         cancel later can store it on a service instance.
     """
     task = asyncio.create_task(coro, name=name)
+    # Tests may replace asyncio.create_task with a mock. Do not let a mocked
+    # return value enter the process-wide registry and fail later during
+    # shutdown cleanup.
+    if not isinstance(task, asyncio.Task):
+        logger.warning("Background task factory returned a non-Task; skipping tracking")
+        return task
+
     _background_tasks.add(task)
     task.add_done_callback(_on_task_done)
     return task
@@ -83,3 +90,40 @@ def _on_task_done(task: asyncio.Task[Any]) -> None:
 def active_task_count() -> int:
     """Number of background tasks currently in flight. Used by tests."""
     return len(_background_tasks)
+
+
+async def cancel_background_tasks(*, timeout: float = 1.0) -> None:
+    """Cancel and await fire-and-forget tasks before loop teardown.
+
+    Background tasks may own database sessions whose aiosqlite worker threads
+    must finish while the event loop is still alive. Call this before closing
+    the loop or disposing the database engine. Tasks that suppress
+    cancellation remain tracked and are reported after the bounded wait.
+    """
+    tracked = tuple(_background_tasks)
+    tasks = tuple(task for task in tracked if isinstance(task, asyncio.Task))
+    invalid = tuple(task for task in tracked if not isinstance(task, asyncio.Task))
+    if invalid:
+        logger.warning("Discarding %d invalid background-task registry entries", len(invalid))
+        _background_tasks.difference_update(invalid)
+
+    if not tasks:
+        return
+
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    if pending:
+        pending_names = [task.get_name() for task in pending]
+        logger.warning(
+            "Timed out waiting %.2fs for background tasks to stop: %s",
+            timeout,
+            ", ".join(pending_names),
+        )
+
+    # Keep pending tasks strongly referenced so their done callbacks can remove
+    # them when they eventually finish. Dropping them here would recreate the
+    # pending-task warnings this cleanup is intended to prevent.
+    _background_tasks.difference_update(done)

@@ -59,6 +59,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Copy version metadata and backend
 COPY VERSION ./VERSION
+
+# Development images pass the checked-out commit so the version shown in the
+# UI identifies the exact source revision. Release builds omit BUILD_COMMIT and
+# therefore retain the canonical VERSION value unchanged.
+ARG BUILD_COMMIT=""
+RUN if [ -n "$BUILD_COMMIT" ]; then \
+        version="$(tr -d '[:space:]' < VERSION)"; \
+        printf '%s-#%s\n' "$version" "$BUILD_COMMIT" > VERSION; \
+    fi
+
 COPY backend/ ./backend/
 
 # Operational recovery tooling is deliberately shipped in the image so it can
@@ -153,6 +163,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 # Run the application
 # Use standard asyncio loop (uvloop has permission issues in some Docker environments)
-# Port is configurable via PORT environment variable (default: 8000)
+# Port is configurable via PORT environment variable (default: 8000).
+# Keep uvicorn as PID 1 so Docker signals reach the application directly.
+# Bound graceful shutdown prevents an open MJPEG response from consuming the
+# entire Compose stop grace period and being killed without checkpointing.
+ENV UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=5
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8000} --loop asyncio"]
+CMD ["sh", "-c", "exec uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8000} --loop asyncio --timeout-graceful-shutdown ${UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN}"]

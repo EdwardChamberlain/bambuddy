@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "Preriscaldamento camera",
+    temperature: "Temperatura obiettivo (°C)",
+    duration: "Durata (minuti)",
+    status: "Preriscaldamento",
+    hint: "30–60°C, 1–120 minuti. Il timer parte quando viene inviato il comando di riscaldamento.",
+    bedOnly: "!! Riscaldatore della camera non disponibile su questa macchina. Il riscaldamento utilizzerà solo il piano.",
+    remaining: 'Rimanente: {{time}}',
+    waitingForConfirmation: 'In attesa della conferma del riscaldamento',
+    skip: 'Salta il preriscaldamento della camera',
+    skipped: 'Preriscaldamento della camera saltato',
+    skipFailed: 'Impossibile saltare il preriscaldamento della camera',
+  },
   // Navigation
   nav: {
     printers: 'Stampanti',
@@ -2053,6 +2066,8 @@ export default {
     slicerCard: 'Slicer',
     orcaslicerApiUrl: 'OrcaSlicer sidecar URL',
     bambuStudioApiUrl: 'Bambu Studio sidecar URL',
+    slicerStallTimeout: 'Timeout di inattivita dello slicer (minuti)',
+    slicerStallTimeoutDescription: 'Interrompe uno slice dopo questo tempo senza progressi dal sidecar. I modelli pesanti che continuano a segnalare progressi non vengono mai interrotti, per quanto tempo richiedano. I sidecar che non segnalano progressi usano questo valore come limite di tempo totale.',
     slicerApiUrlDescription: 'URL del container sidecar slicer-API. Lascia vuoto per usare le variabili d\'ambiente SLICER_API_URL / BAMBU_STUDIO_API_URL.',
     slicerBundlesRemoved: {
       title: 'Bundle slicer (rimosso)',

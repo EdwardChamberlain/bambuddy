@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "チャンバー予熱",
+    temperature: "目標温度 (°C)",
+    duration: "保持時間（分）",
+    status: "予熱中",
+    hint: "30～60°C、1～120分。加熱コマンドを送信するとタイマーが開始します。",
+    bedOnly: "!! この機種にはチャンバーヒーターがありません。ベッドのみで加熱します。",
+    remaining: '残り: {{time}}',
+    waitingForConfirmation: 'ヒーターの確認を待っています',
+    skip: 'チャンバー予熱をスキップ',
+    skipped: 'チャンバー予熱をスキップしました',
+    skipFailed: 'チャンバー予熱をスキップできませんでした',
+  },
   // Navigation
   nav: {
     printers: 'プリンター',
@@ -2096,6 +2109,8 @@ export default {
     slicerCard: 'スライサー',
     orcaslicerApiUrl: 'OrcaSlicer sidecar URL',
     bambuStudioApiUrl: 'Bambu Studio sidecar URL',
+    slicerStallTimeout: 'スライサー停止タイムアウト（分）',
+    slicerStallTimeoutDescription: 'サイドカーからの進捗がこの時間なければスライスを中止します。進捗を報告し続ける重いモデルは、どれだけ時間がかかっても中断されません。進捗を報告しないサイドカーでは、この値が合計時間の上限になります。',
     slicerApiUrlDescription: 'slicer-APIサイドカーコンテナのURL。空のままにすると SLICER_API_URL / BAMBU_STUDIO_API_URL 環境変数のデフォルト値が使用されます。',
     slicerBundlesRemoved: {
       title: 'スライサーバンドル（削除済み）',

@@ -10,10 +10,11 @@ through the logger, and auto-removes finished tasks.
 
 import asyncio
 import logging
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from backend.app.core.tasks import active_task_count, spawn_background_task
+from backend.app.core.tasks import active_task_count, cancel_background_tasks, spawn_background_task
 
 
 @pytest.mark.asyncio
@@ -102,3 +103,62 @@ async def test_task_name_propagates():
     task = spawn_background_task(asyncio.sleep(0), name="named-spawn-test")
     assert task.get_name() == "named-spawn-test"
     await task
+
+
+@pytest.mark.asyncio
+async def test_mocked_task_factory_result_is_not_tracked():
+    """Mocked create_task results must not poison shutdown cleanup."""
+    coro = asyncio.sleep(0)
+    try:
+        with patch.object(asyncio, "create_task", return_value=MagicMock()):
+            result = spawn_background_task(coro, name="mocked-task")
+
+        assert active_task_count() == 0
+        assert isinstance(result, MagicMock)
+    finally:
+        coro.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_waits_for_shutdown():
+    """Shutdown cleanup must cancel tracked tasks and clear the registry."""
+
+    async def long_running() -> None:
+        await asyncio.sleep(10.0)
+
+    task = spawn_background_task(long_running(), name="shutdown-cleanup-test")
+    await asyncio.sleep(0)
+
+    await cancel_background_tasks()
+
+    assert task.cancelled()
+    assert active_task_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_has_hard_timeout(caplog):
+    """Cancellation-resistant tasks must not block shutdown indefinitely."""
+    release = asyncio.Event()
+
+    async def ignores_cancellation() -> None:
+        try:
+            await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+            await release.wait()
+
+    task = spawn_background_task(ignores_cancellation(), name="stubborn-task")
+    await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING, logger="backend.app.core.tasks"):
+        await cancel_background_tasks(timeout=0.01)
+
+    assert not task.done()
+    assert active_task_count() == 1
+    assert any("stubborn-task" in record.message for record in caplog.records)
+
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert active_task_count() == 0

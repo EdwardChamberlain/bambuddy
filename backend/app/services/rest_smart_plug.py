@@ -1,17 +1,27 @@
 """Service for controlling smart plugs via generic REST/HTTP API."""
 
-import ipaddress
 import json
 import logging
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 import httpx
+
+from backend.app.core.logging_filters import redact_url_credentials
 
 if TYPE_CHECKING:
     from backend.app.models.smart_plug import SmartPlug
 
 logger = logging.getLogger(__name__)
+
+
+def _redacted_url(url: str) -> str:
+    """Return a log-safe representation of a user-configured endpoint."""
+    return redact_url_credentials(url) or ""
+
+
+def _redacted_error(error: BaseException) -> str:
+    """Keep URL credentials out of exception text copied into logs/results."""
+    return redact_url_credentials(str(error)) or type(error).__name__
 
 
 class RESTSmartPlugService:
@@ -24,18 +34,39 @@ class RESTSmartPlugService:
         self.timeout = timeout
 
     @staticmethod
-    def _validate_url(url: str) -> bool:
-        """Block cloud metadata and link-local IPs."""
+    def _url_error(url: str) -> str | None:
+        """Return why *url* is rejected by the LAN-service policy, else None.
+
+        Split out from ``_validate_url`` so ``test_connection`` can tell the
+        user which rule the URL broke instead of a single fixed sentence.
+        """
+        from backend.app.api.routes._url_safety import assert_safe_lan_service_url
+
         try:
-            parsed = urlparse(url)
-            hostname = parsed.hostname
-            if not hostname:
-                return False
-            addr = ipaddress.ip_address(hostname)
-            return not addr.is_loopback and not addr.is_link_local
-        except ValueError:
-            # Hostname is not an IP (e.g., "openhab.local") — allow it
-            return True
+            assert_safe_lan_service_url(url, label="REST plug URL")
+        except ValueError as exc:
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _validate_url(url: str) -> bool:
+        """Apply the shared LAN-service SSRF policy to a REST plug URL.
+
+        Delegates to ``_url_safety.assert_safe_lan_service_url`` — the same
+        guard Spoolman, the notification providers and the LAN-service
+        settings use — rather than reimplementing a narrower check. The
+        hand-rolled version this replaces got the policy wrong in both
+        directions: it rejected a literal ``127.0.0.1`` (so an openHAB or
+        Node-RED instance on the same host could only be reached by spelling
+        it ``localhost``), while allowing every target the shared policy
+        rejects unconditionally — Alibaba/AWS-IPv6 metadata endpoints,
+        numeric-encoded IPs, multicast and the unspecified address — because
+        anything that wasn't a bare IP literal fell through to ``True``.
+
+        Loopback and RFC-1918 stay permitted on purpose: a REST-controlled
+        plug bridge running next to Bambuddy is the normal topology.
+        """
+        return RESTSmartPlugService._url_error(url) is None
 
     def _parse_headers(self, headers_json: str | None) -> dict[str, str]:
         """Parse JSON string to dict of headers."""
@@ -46,7 +77,9 @@ class RESTSmartPlugService:
             if isinstance(headers, dict):
                 return {str(k): str(v) for k, v in headers.items()}
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Failed to parse REST headers JSON: %s", headers_json)
+            # Header values commonly contain bearer tokens or basic auth.
+            # Never echo the user-provided blob when parsing fails.
+            logger.warning("Failed to parse REST headers JSON")
         return {}
 
     @staticmethod
@@ -75,11 +108,17 @@ class RESTSmartPlugService:
     ) -> httpx.Response | None:
         """Send an HTTP request and return the response."""
         if not self._validate_url(url):
-            logger.warning("Blocked REST request to invalid URL: %s", url)
+            logger.warning("Blocked REST request to invalid URL: %s", _redacted_url(url))
             return None
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            from backend.app.api.routes._url_safety import lan_service_transport
+
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 kwargs: dict[str, Any] = {"headers": headers or {}}
                 if body is not None:
                     # Try to detect if body is JSON
@@ -95,16 +134,20 @@ class RESTSmartPlugService:
                 response.raise_for_status()
                 return response
         except httpx.TimeoutException:
-            logger.warning("REST smart plug at %s timed out", url)
+            logger.warning("REST smart plug at %s timed out", _redacted_url(url))
             return None
         except httpx.HTTPStatusError as e:
-            logger.warning("REST smart plug at %s returned error: %s", url, e)
+            logger.warning("REST smart plug at %s returned error: %s", _redacted_url(url), _redacted_error(e))
             return None
         except httpx.RequestError as e:
-            logger.warning("Failed to connect to REST smart plug at %s: %s", url, e)
+            logger.warning("Failed to connect to REST smart plug at %s: %s", _redacted_url(url), _redacted_error(e))
             return None
         except Exception as e:
-            logger.error("Unexpected error communicating with REST smart plug at %s: %s", url, e)
+            logger.error(
+                "Unexpected error communicating with REST smart plug at %s: %s",
+                _redacted_url(url),
+                _redacted_error(e),
+            )
             return None
 
     async def turn_on(self, plug: "SmartPlug") -> bool:
@@ -118,7 +161,12 @@ class RESTSmartPlugService:
         response = await self._send_request(plug.rest_on_url, method, headers, plug.rest_on_body)
 
         if response is not None:
-            logger.info("Turned ON REST smart plug '%s' via %s %s", plug.name, method, plug.rest_on_url)
+            logger.info(
+                "Turned ON REST smart plug '%s' via %s %s",
+                plug.name,
+                method,
+                _redacted_url(plug.rest_on_url),
+            )
             return True
 
         logger.warning("Failed to turn ON REST smart plug '%s'", plug.name)
@@ -135,7 +183,12 @@ class RESTSmartPlugService:
         response = await self._send_request(plug.rest_off_url, method, headers, plug.rest_off_body)
 
         if response is not None:
-            logger.info("Turned OFF REST smart plug '%s' via %s %s", plug.name, method, plug.rest_off_url)
+            logger.info(
+                "Turned OFF REST smart plug '%s' via %s %s",
+                plug.name,
+                method,
+                _redacted_url(plug.rest_off_url),
+            )
             return True
 
         logger.warning("Failed to turn OFF REST smart plug '%s'", plug.name)
@@ -250,13 +303,20 @@ class RESTSmartPlugService:
             - success: bool
             - error: error message if failed
         """
-        if not self._validate_url(url):
-            return {"success": False, "error": "Invalid URL (loopback/link-local addresses are blocked)"}
+        url_error = self._url_error(url)
+        if url_error:
+            return {"success": False, "error": url_error}
 
         parsed_headers = self._parse_headers(headers)
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            from backend.app.api.routes._url_safety import lan_service_transport
+
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                transport=lan_service_transport(),
+                trust_env=False,
+            ) as client:
                 response = await client.request(method.upper(), url, headers=parsed_headers)
                 response.raise_for_status()
                 return {"success": True, "error": None}
@@ -265,9 +325,9 @@ class RESTSmartPlugService:
         except httpx.HTTPStatusError as e:
             return {"success": False, "error": f"HTTP {e.response.status_code}: {e.response.reason_phrase}"}
         except httpx.RequestError as e:
-            return {"success": False, "error": f"Connection failed: {e}"}
+            return {"success": False, "error": f"Connection failed: {_redacted_error(e)}"}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": _redacted_error(e)}
 
 
 # Singleton instance

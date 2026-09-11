@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "Kammer vorheizen",
+    temperature: "Zieltemperatur (°C)",
+    duration: "Haltezeit (Minuten)",
+    status: "Vorheizen",
+    hint: "30–60°C, 1–120 Minuten. Der Timer startet, sobald der Heizbefehl gesendet wird.",
+    bedOnly: "!! Kammerheizung an diesem Gerät nicht verfügbar. Es wird nur über das Druckbett geheizt.",
+    remaining: 'Verbleibend: {{time}}',
+    waitingForConfirmation: 'Warte auf Bestätigung der Heizung',
+    skip: 'Kammeraufheizung überspringen',
+    skipped: 'Kammeraufheizung übersprungen',
+    skipFailed: 'Kammeraufheizung konnte nicht übersprungen werden',
+  },
   // Navigation
   nav: {
     printers: 'Drucker',
@@ -2097,6 +2110,8 @@ export default {
     slicerCard: 'Slicer',
     orcaslicerApiUrl: 'OrcaSlicer Sidecar-URL',
     bambuStudioApiUrl: 'Bambu Studio Sidecar-URL',
+    slicerStallTimeout: 'Zeitlimit bei Slicer-Stillstand (Minuten)',
+    slicerStallTimeoutDescription: 'Bricht einen Slice-Vorgang ab, wenn der Sidecar so lange keinen Fortschritt meldet. Aufwendige Modelle, die weiter Fortschritt melden, werden nie abgebrochen, egal wie lange sie brauchen. Sidecars ohne Fortschrittsmeldung nutzen diesen Wert stattdessen als Gesamtzeitlimit.',
     slicerApiUrlDescription: 'URL des Slicer-API-Sidecar-Containers. Leer lassen, um die SLICER_API_URL- bzw. BAMBU_STUDIO_API_URL-Umgebungsvariablen zu nutzen.',
     slicerBundlesRemoved: {
       title: 'Slicer-Bundles (entfernt)',

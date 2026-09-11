@@ -1,4 +1,17 @@
 export default {
+  heatSoak: {
+    option: "Precalentamiento de cámara",
+    temperature: "Temperatura objetivo (°C)",
+    duration: "Duración (minutos)",
+    status: "Precalentando",
+    hint: "30–60°C, 1–120 minutos. El temporizador comienza cuando se envía el comando de calentamiento.",
+    bedOnly: "!! Esta máquina no tiene calefactor de cámara. Solo se utilizará la cama para calentar.",
+    remaining: 'Restante: {{time}}',
+    waitingForConfirmation: 'Esperando la confirmación del calentador',
+    skip: 'Omitir el calentamiento de la cámara',
+    skipped: 'Calentamiento de cámara omitido',
+    skipFailed: 'No se pudo omitir el calentamiento de la cámara',
+  },
   // Navigation
   nav: {
     printers: 'Impresoras',
@@ -2100,6 +2113,8 @@ export default {
     slicerCard: 'Laminador',
     orcaslicerApiUrl: 'OrcaSlicer sidecar URL',
     bambuStudioApiUrl: 'Bambu Studio sidecar URL',
+    slicerStallTimeout: 'Tiempo de espera por inactividad del laminador (minutos)',
+    slicerStallTimeoutDescription: 'Abandona un laminado tras este tiempo sin progreso del sidecar. Los modelos pesados que siguen informando progreso nunca se interrumpen, por mucho que tarden. Los sidecars que no informan progreso usan este valor como limite de tiempo total.',
     slicerApiUrlDescription: 'URL del contenedor auxiliar de la API del laminador. Déjelo en blanco para usar los valores predeterminados de las variables de entorno SLICER_API_URL / BAMBU_STUDIO_API_URL.',
     slicerBundlesRemoved: {
       title: 'Paquetes del laminador (eliminado)',
