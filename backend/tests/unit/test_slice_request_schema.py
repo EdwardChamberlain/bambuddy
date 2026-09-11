@@ -152,3 +152,40 @@ class TestPresetsRequired:
     def test_empty_request_rejected(self):
         with pytest.raises(ValidationError):
             SliceRequest()
+
+
+class TestRicherSliceControls:
+    """Layout actions are explicit per-slice choices and embedded settings
+    are opt-in so legacy requests retain their existing behaviour."""
+
+    def test_controls_default_to_legacy_behaviour(self):
+        req = SliceRequest(
+            printer_preset_id=1,
+            process_preset_id=2,
+            filament_preset_id=3,
+        )
+        assert req.auto_arrange is False
+        assert req.auto_orient is False
+        assert req.use_embedded_settings is False
+
+    def test_controls_are_independent(self):
+        req = SliceRequest(
+            printer_preset_id=1,
+            process_preset_id=2,
+            filament_preset_id=3,
+            auto_arrange=True,
+            auto_orient=True,
+            use_embedded_settings=True,
+        )
+        assert req.auto_arrange is True
+        assert req.auto_orient is True
+        assert req.use_embedded_settings is True
+
+    def test_process_overrides_are_sparse_and_optional(self):
+        req = SliceRequest(
+            printer_preset_id=1,
+            process_preset_id=2,
+            filament_preset_id=3,
+            process_overrides={"layer_height": 0.2, "enable_support": True},
+        )
+        assert req.process_overrides == {"layer_height": 0.2, "enable_support": True}

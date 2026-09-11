@@ -529,6 +529,7 @@ class SlicerApiService:
         plate: int | None = None,
         export_3mf: bool = False,
         arrange: bool = False,
+        orient: bool = False,
         request_id: str | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> SliceResult:
@@ -580,11 +581,7 @@ class SlicerApiService:
             data["plate"] = str(plate)
         if export_3mf:
             data["exportType"] = "3mf"
-        if arrange:
-            # Sidecar reads non-empty truthy strings as True; only send the
-            # field when we want the flag on, so default-off callers exactly
-            # match the previous wire payload.
-            data["arrange"] = "true"
+        _add_layout_flags(data, arrange=arrange, orient=orient)
         if request_id is not None:
             data["requestId"] = request_id
 
@@ -603,6 +600,8 @@ class SlicerApiService:
         model_filename: str,
         plate: int | None = None,
         export_3mf: bool = False,
+        arrange: bool = False,
+        orient: bool = False,
         request_id: str | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> SliceResult:
@@ -630,6 +629,7 @@ class SlicerApiService:
             data["plate"] = str(plate)
         if export_3mf:
             data["exportType"] = "3mf"
+        _add_layout_flags(data, arrange=arrange, orient=orient)
         if request_id is not None:
             data["requestId"] = request_id
 
@@ -640,6 +640,14 @@ class SlicerApiService:
         # the user's toast through the slow operation.
         response = await self._post_slice(files=files, data=data, request_id=request_id, on_progress=on_progress)
         return _handle_slice_response(response, export_3mf=export_3mf, plate=plate)
+
+
+def _add_layout_flags(data: dict[str, str], *, arrange: bool, orient: bool) -> None:
+    """Send enabled layout actions to the sidecar without false form values."""
+    if arrange:
+        data["arrange"] = "true"
+    if orient:
+        data["orient"] = "true"
 
 
 def _safe_int(value: str | None) -> int:

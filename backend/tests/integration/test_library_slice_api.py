@@ -352,6 +352,84 @@ class TestSliceLibraryFile:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_process_overrides_patch_selected_profile(self, async_client: AsyncClient, slice_test_setup):
+        """#83: the common process controls from the slice modal are applied
+        to the selected process profile before it reaches the sidecar."""
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = bytes(request.content)
+            return httpx.Response(
+                status_code=200,
+                content=_make_3mf_with_settings(sliced_output=True),
+                headers={
+                    "x-print-time-seconds": "10",
+                    "x-filament-used-g": "0.1",
+                    "x-filament-used-mm": "1.0",
+                },
+            )
+
+        _install_mock_sidecar(handler)
+        response = await async_client.post(
+            f"/api/v1/library/files/{slice_test_setup['src_file_id']}/slice",
+            json={
+                "printer_preset_id": slice_test_setup["printer_id"],
+                "process_preset_id": slice_test_setup["process_id"],
+                "filament_preset_id": slice_test_setup["filament_id"],
+                "process_overrides": {
+                    "layer_height": 0.2,
+                    "wall_loops": 3,
+                    "sparse_infill_density": "20%",
+                    "enable_support": True,
+                },
+            },
+        )
+        assert response.status_code == 202
+        final = await _wait_for_job(async_client, response.json()["job_id"])
+        assert final["status"] == "completed", final
+        assert b'"layer_height": "0.2"' in captured["body"]
+        assert b'"wall_loops": "3"' in captured["body"]
+        assert b'"sparse_infill_density": "20%"' in captured["body"]
+        assert b'"enable_support": "1"' in captured["body"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_layout_controls_reach_sidecar(self, async_client: AsyncClient, slice_test_setup):
+        """#83: auto-arrange and auto-orient are forwarded as opt-in form
+        fields; the sidecar must receive no false-valued fields by default."""
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = bytes(request.content)
+            return httpx.Response(
+                status_code=200,
+                content=_make_3mf_with_settings(sliced_output=True),
+                headers={
+                    "x-print-time-seconds": "10",
+                    "x-filament-used-g": "0.1",
+                    "x-filament-used-mm": "1.0",
+                },
+            )
+
+        _install_mock_sidecar(handler)
+        response = await async_client.post(
+            f"/api/v1/library/files/{slice_test_setup['src_file_id']}/slice",
+            json={
+                "printer_preset_id": slice_test_setup["printer_id"],
+                "process_preset_id": slice_test_setup["process_id"],
+                "filament_preset_id": slice_test_setup["filament_id"],
+                "auto_arrange": True,
+                "auto_orient": True,
+            },
+        )
+        assert response.status_code == 202
+        final = await _wait_for_job(async_client, response.json()["job_id"])
+        assert final["status"] == "completed", final
+        assert b'name="arrange"' in captured["body"]
+        assert b'name="orient"' in captured["body"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_invalid_preset_id_surfaces_as_failed_job_with_status_400(
         self, async_client: AsyncClient, slice_test_setup
     ):

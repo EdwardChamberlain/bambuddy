@@ -220,6 +220,16 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   // incompatible with high-temp filaments like ABS / ASA / PC, and the
   // user had no way to switch plates without cloning the preset.
   const [bedType, setBedType] = useState<string | null>(null);
+  // Per-slice layout/design controls. These are intentionally opt-in: auto
+  // arrange/orient change geometry, while embedded settings change which
+  // process values win over the selected profile.
+  const [autoArrange, setAutoArrange] = useState(false);
+  const [autoOrient, setAutoOrient] = useState(false);
+  const [useEmbedded, setUseEmbedded] = useState(false);
+  const [layerHeight, setLayerHeight] = useState('');
+  const [wallLoops, setWallLoops] = useState('');
+  const [infillDensity, setInfillDensity] = useState('');
+  const [supportOverride, setSupportOverride] = useState('');
 
   const platesQuery = useQuery({
     queryKey: ['slicePlates', source.kind, source.id],
@@ -352,6 +362,19 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
   const embeddedPrinter = platesQuery.data?.embedded_printer ?? null;
   const embeddedProcess = platesQuery.data?.embedded_process ?? null;
 
+  // Embedded settings are safe only when this is a project 3MF with a
+  // matching selected printer. A cross-printer slice must continue through
+  // the explicit profile path so the target printer is really applied.
+  const canUseEmbedded = useMemo(() => {
+    if (!embeddedPrinter || !embeddedProcess || !selectedPrinterName) return false;
+    const normalise = (name: string) => name.replace(/^#\s*/, '').trim().toLowerCase();
+    return normalise(selectedPrinterName) === normalise(embeddedPrinter);
+  }, [embeddedPrinter, embeddedProcess, selectedPrinterName]);
+
+  useEffect(() => {
+    if (!canUseEmbedded) setUseEmbedded(false);
+  }, [canUseEmbedded]);
+
   // Printer pre-pick: defaults to the printer the 3MF was prepared for when
   // that preset is available, else the first listed printer. Runs once when
   // presets first arrive; later re-renders preserve any manual choice.
@@ -441,6 +464,13 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
     ) {
       throw new Error(t('slice.allPresetsRequired'));
     }
+    const processOverrides: Record<string, string | number | boolean> = {};
+    if (!useEmbedded) {
+      if (layerHeight.trim()) processOverrides.layer_height = layerHeight.trim();
+      if (wallLoops.trim()) processOverrides.wall_loops = wallLoops.trim();
+      if (infillDensity.trim()) processOverrides.sparse_infill_density = `${infillDensity.trim()}%`;
+      if (supportOverride) processOverrides.enable_support = supportOverride;
+    }
     return {
       printer_preset: printerPreset,
       process_preset: processPreset,
@@ -448,6 +478,10 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
       filament_presets: filamentPresets as PresetRef[],
       ...(plate != null ? { plate } : {}),
       ...(bedType != null ? { bed_type: bedType } : {}),
+      ...(autoArrange ? { auto_arrange: true } : {}),
+      ...(autoOrient ? { auto_orient: true } : {}),
+      ...(useEmbedded && canUseEmbedded ? { use_embedded_settings: true } : {}),
+      ...(Object.keys(processOverrides).length > 0 ? { process_overrides: processOverrides } : {}),
     };
   }
 
@@ -566,15 +600,32 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                 data={presetsQuery.data}
                 value={printerPreset}
                 onChange={setPrinterPreset}
-                disabled={isEnqueuing}
+                disabled={isEnqueuing || useEmbedded}
               />
+              {canUseEmbedded && (
+                <label className="flex items-start gap-2 text-sm text-bambu-gray cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={useEmbedded}
+                    onChange={(e) => setUseEmbedded(e.target.checked)}
+                    disabled={isEnqueuing}
+                    className="mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    {t('slice.useEmbedded', "Use the file's built-in settings")}
+                    <span className="block text-xs text-bambu-gray/70">
+                      {t('slice.useEmbeddedHint', 'Keep the designer\'s walls, infill, and filament settings.')}
+                    </span>
+                  </span>
+                </label>
+              )}
               <PresetDropdown
                 label={t('slice.process')}
                 slot="process"
                 data={presetsQuery.data}
                 value={processPreset}
                 onChange={setProcessPreset}
-                disabled={isEnqueuing}
+                disabled={isEnqueuing || useEmbedded}
                 selectedPrinterName={selectedPrinterName}
                 compatIndex={compatIndex}
               />
@@ -584,8 +635,109 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
               <BedTypeDropdown
                 value={bedType}
                 onChange={setBedType}
-                disabled={isEnqueuing}
+                disabled={isEnqueuing || useEmbedded}
               />
+              <div className="space-y-3 rounded-md border border-bambu-dark-tertiary/40 p-3">
+                <div>
+                  <div className="text-xs text-bambu-gray">
+                    {t('slice.processControls', 'Process controls')}
+                  </div>
+                  <p className="text-xs text-bambu-gray/70 mt-1">
+                    {t('slice.processControlsHint', 'Optional edits override the selected process profile.')}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="block text-xs text-bambu-gray mb-1">
+                      {t('slice.layerHeight', 'Layer height (mm)')}
+                    </span>
+                    <input
+                      type="number"
+                      min="0.05"
+                      max="1"
+                      step="0.01"
+                      value={layerHeight}
+                      onChange={(e) => setLayerHeight(e.target.value)}
+                      placeholder="Preset"
+                      disabled={isEnqueuing || useEmbedded}
+                      className="w-full px-3 py-2 rounded-md bg-bambu-dark border border-bambu-dark-tertiary text-white text-sm focus:outline-none focus:border-bambu-gray disabled:opacity-50"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="block text-xs text-bambu-gray mb-1">
+                      {t('slice.wallLoops', 'Wall loops')}
+                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      step="1"
+                      value={wallLoops}
+                      onChange={(e) => setWallLoops(e.target.value)}
+                      placeholder="Preset"
+                      disabled={isEnqueuing || useEmbedded}
+                      className="w-full px-3 py-2 rounded-md bg-bambu-dark border border-bambu-dark-tertiary text-white text-sm focus:outline-none focus:border-bambu-gray disabled:opacity-50"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="block text-xs text-bambu-gray mb-1">
+                      {t('slice.infillDensity', 'Infill density (%)')}
+                    </span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={infillDensity}
+                      onChange={(e) => setInfillDensity(e.target.value)}
+                      placeholder="Preset"
+                      disabled={isEnqueuing || useEmbedded}
+                      className="w-full px-3 py-2 rounded-md bg-bambu-dark border border-bambu-dark-tertiary text-white text-sm focus:outline-none focus:border-bambu-gray disabled:opacity-50"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="block text-xs text-bambu-gray mb-1">
+                      {t('slice.supports', 'Supports')}
+                    </span>
+                    <ReactSelect
+                      value={supportOverride}
+                      onChange={(e) => setSupportOverride(e.target.value)}
+                      disabled={isEnqueuing || useEmbedded}
+                      className="w-full px-3 py-2 rounded-md bg-bambu-dark border border-bambu-dark-tertiary text-white text-sm focus:outline-none focus:border-bambu-gray disabled:opacity-50"
+                    >
+                      <option value="">{t('slice.usePreset', 'Use preset')}</option>
+                      <option value="1">{t('slice.enabled', 'Enabled')}</option>
+                      <option value="0">{t('slice.disabled', 'Disabled')}</option>
+                    </ReactSelect>
+                  </label>
+                </div>
+              </div>
+              <div className="space-y-2 rounded-md border border-bambu-dark-tertiary/40 p-3">
+                <div className="text-xs text-bambu-gray">{t('slice.layoutControls', 'Layout controls')}</div>
+                <label className="flex items-center gap-2 text-sm text-bambu-gray cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoArrange}
+                    onChange={(e) => setAutoArrange(e.target.checked)}
+                    disabled={isEnqueuing}
+                    className="cursor-pointer"
+                  />
+                  {t('slice.autoArrange', 'Auto arrange objects')}
+                </label>
+                <label className="flex items-center gap-2 text-sm text-bambu-gray cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoOrient}
+                    onChange={(e) => setAutoOrient(e.target.checked)}
+                    disabled={isEnqueuing}
+                    className="cursor-pointer"
+                  />
+                  {t('slice.autoOrient', 'Auto orient objects')}
+                </label>
+                <p className="text-xs text-bambu-gray/70">
+                  {t('slice.layoutControlsHint', 'These options change object placement before slicing.')}
+                </p>
+              </div>
               {/* Filament reqs may need a server-side preview-slice for
                   unsliced project files (single-pass, then cached). Show a
                   scoped spinner so the user sees the printer/process
@@ -631,7 +783,7 @@ export function SliceModal({ source, onClose }: SliceModalProps) {
                           return next;
                         })
                       }
-                      disabled={isEnqueuing || !isUsed}
+                      disabled={isEnqueuing || !isUsed || useEmbedded}
                       swatchColor={filamentSlots.length > 1 ? slot.color : undefined}
                       selectedPrinterName={selectedPrinterName}
                       compatIndex={compatIndex}

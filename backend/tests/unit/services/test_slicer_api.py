@@ -13,6 +13,7 @@ from backend.app.services.slicer_api import (
     SlicerApiUnavailableError,
     SliceResult,
     SlicerInputError,
+    _add_layout_flags,
     _guess_model_content_type,
 )
 
@@ -46,6 +47,21 @@ class TestGuessModelContentType:
 
     def test_unknown(self):
         assert _guess_model_content_type("foo.bar") == "application/octet-stream"
+
+
+class TestLayoutFlags:
+    """The sidecar treats a present multipart flag as enabled, so disabled
+    layout actions must be represented by omission rather than ``false``."""
+
+    def test_enabled_flags_are_forwarded(self):
+        data: dict[str, str] = {}
+        _add_layout_flags(data, arrange=True, orient=True)
+        assert data == {"arrange": "true", "orient": "true"}
+
+    def test_disabled_flags_are_omitted(self):
+        data: dict[str, str] = {}
+        _add_layout_flags(data, arrange=False, orient=False)
+        assert data == {}
 
 
 class TestSliceWithProfiles:

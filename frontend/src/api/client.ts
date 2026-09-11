@@ -1497,6 +1497,16 @@ export interface SliceRequest {
   // "Textured PEI Plate", "Smooth PEI Plate", "Cool Plate (SuperTack)",
   // "Supertack Plate".
   bed_type?: string | null;
+  // Per-slice geometry actions. Omitted when off because the sidecar treats
+  // the presence of these multipart fields as enabling the corresponding
+  // CLI flag.
+  auto_orient?: boolean;
+  auto_arrange?: boolean;
+  // For project 3MFs, use the file's embedded project settings rather than
+  // the selected profile triplet.
+  use_embedded_settings?: boolean;
+  // Sparse edits for the common process controls exposed in SliceModal.
+  process_overrides?: Record<string, string | number | boolean>;
 }
 
 // GET /api/v1/slicer/presets — unified listing across cloud / local / standard.
