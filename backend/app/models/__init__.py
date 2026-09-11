@@ -28,6 +28,7 @@ from backend.app.models.smart_plug_energy_snapshot import SmartPlugEnergySnapsho
 from backend.app.models.spool import Spool
 from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spool_catalog import SpoolCatalogEntry
+from backend.app.models.spool_filament_preset import SpoolFilamentPreset, SpoolmanFilamentPreset
 from backend.app.models.spool_k_profile import SpoolKProfile
 from backend.app.models.spool_usage_history import SpoolUsageHistory
 from backend.app.models.spoolbuddy_device import SpoolBuddyDevice
@@ -69,7 +70,9 @@ __all__ = [
     "UserOIDCLink",
     "OrcaBaseProfile",
     "Spool",
+    "SpoolFilamentPreset",
     "SpoolKProfile",
+    "SpoolmanFilamentPreset",
     "SpoolAssignment",
     "SpoolCatalogEntry",
     "SpoolUsageHistory",

@@ -103,6 +103,9 @@ from backend.app.services.printer_manager import (
     printer_manager,
     printer_state_to_dict,
 )
+from backend.app.services.slot_nozzle import (
+    resolve_slot_nozzle,
+)
 from backend.app.services.smart_plug_manager import smart_plug_manager
 from backend.app.services.spool_assignment_notifications import (
     notify_missing_spool_assignments_on_print_start,
@@ -114,6 +117,7 @@ from backend.app.services.spoolman_tracking import (
     store_print_data as _store_spoolman_print_data,
 )
 from backend.app.services.tasmota import tasmota_service
+from backend.app.utils.fts_routing import extruder_for_inlet
 
 
 # =============================================================================
@@ -1445,6 +1449,110 @@ def _is_bambu_uuid(tray_uuid: str) -> bool:
     return bool(tray_uuid) and tray_uuid not in ("", "0" * len(tray_uuid))
 
 
+async def on_fts_inlet_change(printer_id: int, ams_id: int, inlet: str):
+    """Re-apply a moved AMS's filament and calibration settings.
+
+    An FTS move changes the nozzle behind every tray in the AMS. The slot's
+    filament preset is model-and-nozzle aware, and its calibration index is
+    nozzle-specific, but the printer does not reconfigure either one when the
+    switch binding changes. Reusing the normal assignment paths keeps both
+    pieces together and also resets a stale K-profile when the target nozzle
+    has no stored calibration for that spool.
+
+    A slot with no known inventory assignment is left untouched. The callback
+    runs only after the MQTT parser has updated ``ams_switch_inlet``, so the
+    shared assignment helpers resolve the new target nozzle.
+    """
+    logger = logging.getLogger(__name__)
+
+    if extruder_for_inlet(inlet) is None:
+        return
+
+    client = printer_manager.get_client(printer_id)
+    state = printer_manager.get_status(printer_id)
+    if not client or not state or not state.raw_data:
+        return
+
+    ams_raw = state.raw_data.get("ams")
+    ams_list = ams_raw.get("ams", []) if isinstance(ams_raw, dict) else ams_raw if isinstance(ams_raw, list) else []
+    unit = next((u for u in ams_list if str(u.get("id")) == str(ams_id)), None)
+    if not unit:
+        return
+
+    try:
+        async with async_session() as db:
+            from backend.app.services.inventory_mode import spoolman_owns_assignments
+
+            if await spoolman_owns_assignments(db):
+                from backend.app.api.routes.spoolman_inventory import (
+                    SpoolSlotAssignmentRequest,
+                    assign_spoolman_slot,
+                )
+                from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
+
+                result = await db.execute(
+                    select(SpoolmanSlotAssignment).where(
+                        SpoolmanSlotAssignment.printer_id == printer_id,
+                        SpoolmanSlotAssignment.ams_id == ams_id,
+                    )
+                )
+                assignments = {row.tray_id: row for row in result.scalars().all()}
+                for tray in unit.get("tray", []):
+                    tray_id = int(tray.get("id", -1))
+                    assignment = assignments.get(tray_id)
+                    if assignment is None or not tray.get("tray_type"):
+                        continue
+                    await assign_spoolman_slot(
+                        SpoolSlotAssignmentRequest(
+                            spoolman_spool_id=assignment.spoolman_spool_id,
+                            printer_id=printer_id,
+                            ams_id=ams_id,
+                            tray_id=tray_id,
+                        ),
+                        db=db,
+                        current_user=None,
+                    )
+                return
+
+            from sqlalchemy.orm import selectinload
+
+            from backend.app.api.routes.inventory import apply_spool_to_slot_via_mqtt
+            from backend.app.models.spool import Spool
+            from backend.app.models.spool_assignment import SpoolAssignment
+
+            result = await db.execute(
+                select(SpoolAssignment).where(
+                    SpoolAssignment.printer_id == printer_id,
+                    SpoolAssignment.ams_id == ams_id,
+                )
+            )
+            assignments = {row.tray_id: row for row in result.scalars().all()}
+            for tray in unit.get("tray", []):
+                tray_id = int(tray.get("id", -1))
+                assignment = assignments.get(tray_id)
+                if assignment is None or not tray.get("tray_type"):
+                    continue
+                spool = (
+                    await db.execute(
+                        select(Spool).options(selectinload(Spool.k_profiles)).where(Spool.id == assignment.spool_id)
+                    )
+                ).scalar_one_or_none()
+                if spool is None:
+                    continue
+                await apply_spool_to_slot_via_mqtt(
+                    db=db,
+                    current_user=None,
+                    spool=spool,
+                    printer_id=printer_id,
+                    ams_id=ams_id,
+                    tray_id=tray_id,
+                    current_tray_info_idx=str(tray.get("tray_info_idx") or ""),
+                    current_tray_type=str(tray.get("tray_type") or ""),
+                )
+    except Exception as e:
+        logger.warning("[Printer %s] Could not re-apply slot settings after inlet move: %s", printer_id, e)
+
+
 async def on_ams_change(printer_id: int, ams_data: list):
     """Handle AMS data changes - sync to Spoolman if enabled and auto mode."""
     logger = logging.getLogger(__name__)
@@ -1808,17 +1916,11 @@ async def on_ams_change(printer_id: int, ams_data: list):
                                     and spool.k_profiles
                                 ):
                                     state = printer_manager.get_status(printer_id)
-                                    nozzle_diameter = "0.4"
-                                    if state and state.nozzles:
-                                        nd = state.nozzles[0].nozzle_diameter
-                                        if nd:
-                                            nozzle_diameter = nd
-                                    slot_extruder: int | None = None
-                                    if state and state.ams_extruder_map:
-                                        if ams_id == 255:
-                                            slot_extruder = 1 - tray_id
-                                        else:
-                                            slot_extruder = state.ams_extruder_map.get(str(ams_id))
+                                    slot_nozzle = resolve_slot_nozzle(
+                                        state, ams_id, tray_id, printer_manager.get_model(printer_id)
+                                    )
+                                    nozzle_diameter = slot_nozzle.diameter
+                                    slot_extruder = slot_nozzle.extruder
                                     # Prefer exact extruder match, fall back to
                                     # extruder-agnostic kp for the same printer +
                                     # nozzle. Avoids hard-skipping when the AMS is
@@ -1830,6 +1932,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                                             kp.printer_id != printer_id
                                             or kp.nozzle_diameter != nozzle_diameter
                                             or kp.cali_idx is None
+                                            or not slot_nozzle.flow_matches(kp.nozzle_type)
                                         ):
                                             continue
                                         if (
@@ -6466,6 +6569,7 @@ async def lifespan(app: FastAPI):
     printer_manager.set_print_running_observed_callback(on_print_running_observed)
     printer_manager.set_finish_photo_moment_callback(on_finish_photo_moment)
     printer_manager.set_ams_change_callback(on_ams_change)
+    printer_manager.set_fts_inlet_change_callback(on_fts_inlet_change)
 
     async def on_tray_change(printer_id: int, tray_global: int, layer_num: int):
         """Persist tray boundaries used to split usage after restart recovery."""

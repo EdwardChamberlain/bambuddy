@@ -370,15 +370,39 @@ export function filterFilamentsByNozzle<T extends { extruderId?: number }>(
 }
 
 /**
+ * List the distinct nozzle diameters the printer actually reports (#2618).
+ * Empty, non-positive, and duplicate values are ignored while the status is
+ * still being populated by MQTT. The returned bare decimal strings can be
+ * passed directly to the per-diameter K-profile endpoint.
+ */
+export function installedNozzleDiameters(
+  status: { nozzles?: { nozzle_diameter?: string }[] } | null | undefined,
+): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const nozzle of status?.nozzles ?? []) {
+    const raw = (nozzle?.nozzle_diameter ?? '').trim();
+    if (!raw || !(parseFloat(raw) > 0) || seen.has(raw)) continue;
+    seen.add(raw);
+    result.push(raw);
+  }
+  return result;
+}
+
+/**
  * Resolve the installed nozzle diameter feeding a given AMS unit, so the
  * Configure-AMS-Slot picker filters filament presets by the nozzle actually on
  * the machine instead of assuming 0.4mm (#1899).
  *
  * On dual-nozzle printers (H2D) each AMS is bound to one extruder via
- * `ams_extruder_map` (amsId → extruder index, 0=left/primary, 1=right), so we
- * read that nozzle's diameter. Single-nozzle printers have no map entry and
- * fall back to the primary nozzle (index 0). Returns undefined when the printer
- * hasn't reported nozzle hardware yet, letting the caller keep its own default.
+ * `ams_extruder_map` (amsId → extruder index), so we read that nozzle's
+ * diameter. `status.nozzles` is indexed by extruder id -- [0] is the RIGHT
+ * hotend and [1] the left, measured on an H2D fitted with 0.4 left / 0.6 right
+ * -- so indexing it by the extruder is correct. (This comment used to say
+ * "0=left/primary, 1=right", which was backwards; the code was always right.)
+ * Single-nozzle printers have no map entry and fall back to index 0. Returns
+ * undefined when the printer hasn't reported nozzle hardware yet, letting the
+ * caller keep its own default.
  * Diameter is the bare decimal string the status carries, e.g. "0.4" / "0.6".
  */
 export function resolveSlotNozzleDiameter(

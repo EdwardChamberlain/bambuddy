@@ -276,6 +276,7 @@ async def init_db():
         spool,
         spool_assignment,
         spool_catalog,
+        spool_filament_preset,
         spool_k_profile,
         spool_usage_history,
         spoolbuddy_device,

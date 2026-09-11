@@ -387,8 +387,13 @@ class PrinterState:
     ipcam: bool = False  # Live view / camera streaming enabled
     wifi_signal: int | None = None  # WiFi signal strength in dBm
     wired_network: bool = False  # Ethernet connection detected (home_flag bit 18)
-    door_open: bool = False  # Enclosure door open (home_flag bit 23, X1/P1S/P2S/H2*)
-    # Nozzle hardware info (for dual nozzle printers, index 0 = left, 1 = right)
+    door_open: bool = False  # Enclosure door open (home_flag bit 23; models with a door sensor: X1/X1C/X1E/X2D/P2S/H2*)
+    # Nozzle hardware info. Indexed by EXTRUDER id: [0] is the RIGHT hotend and
+    # [1] the left, measured 2026-08-27 on an H2D fitted with 0.4 left / 0.6
+    # right. (The legacy parser below writes left -> [0], but it only ever runs
+    # for single-nozzle printers -- every dual-nozzle model reports
+    # device.nozzle.info instead.) Read it through services.slot_nozzle rather
+    # than indexing it directly.
     nozzles: list = field(default_factory=lambda: [NozzleInfo(), NozzleInfo()])
     # AI detection and print options
     print_options: PrintOptions = field(default_factory=PrintOptions)
@@ -425,6 +430,8 @@ class PrinterState:
     # Filament Track Switch (FTS) accessory — when installed, AMS info reports
     # bits 8-11 = 0xE (uninitialized) because routing is dynamic. See #1162.
     fila_switch: "FilaSwitchState" = field(default_factory=lambda: FilaSwitchState())
+    # Per-AMS FTS inlet binding: {ams_id: "A" | "B"}.
+    ams_switch_inlet: dict = field(default_factory=dict)
     # Plate dispatched by Grove Control for the current print. Some firmware versions
     # (P1S 01.10.00.00) only put the .3mf filename in print.gcode_file, so the
     # regex used to derive the plate number from the path always falls back to
@@ -573,6 +580,7 @@ class BambuMQTTClient:
         on_print_running_observed: Callable[[dict], None] | None = None,
         on_finish_photo_moment: Callable[[dict], None] | None = None,
         on_tray_change: Callable[[int, int], None] | None = None,
+        on_fts_inlet_change: Callable[[int, str], None] | None = None,
     ):
         self.ip_address = ip_address
         self.serial_number = serial_number
@@ -582,6 +590,9 @@ class BambuMQTTClient:
         self.on_print_start = on_print_start
         self.on_print_complete = on_print_complete
         self.on_ams_change = on_ams_change
+        # Fired when an AMS is moved to the switch's other inlet, which changes
+        # the nozzle it feeds and invalidates its slots' K-profile bindings.
+        self.on_fts_inlet_change = on_fts_inlet_change
         self.on_layer_change = on_layer_change
         self.on_bed_temp_update = on_bed_temp_update
         # #1349: fired when an AMS unit's dry_time falls from >0 to 0 — i.e.
@@ -1345,6 +1356,22 @@ class BambuMQTTClient:
                     if isinstance(ext_info, list) and len(ext_info) >= 2:
                         self._is_dual_nozzle = True
                         logger.info("[%s] Detected dual-nozzle printer from device.extruder.info", self.serial_number)
+
+            # Parse FTS presence before AMS info: on FTS-equipped printers the
+            # AMS extruder bits are intentionally 0xE and the inlet bits are
+            # meaningful only once the switch has been identified.
+            device = print_data.get("device")
+            fs_data = device.get("fila_switch") if isinstance(device, dict) else None
+            if isinstance(fs_data, dict):
+                in_raw = fs_data.get("in")
+                out_raw = fs_data.get("out")
+                self.state.fila_switch = FilaSwitchState(
+                    installed=True,
+                    in_slots=list(in_raw) if isinstance(in_raw, list) else [],
+                    out_extruders=list(out_raw) if isinstance(out_raw, list) else [],
+                    stat=int(fs_data.get("stat", 0) or 0),
+                    info=int(fs_data.get("info", 0) or 0),
+                )
 
             # Handle AMS data that comes inside print key
             if "ams" in print_data:
@@ -2395,7 +2422,10 @@ class BambuMQTTClient:
         # Use merged_ams (not ams_list) to avoid partial MQTT updates overwriting
         # the full map. Merge into existing map to preserve entries from prior updates.
 
+        fts_installed = self.state.fila_switch.installed
+        inlet_moves: list[tuple[int, str]] = []
         ams_extruder_map = dict(self.state.ams_extruder_map) if self.state.ams_extruder_map else {}
+        ams_switch_inlet = dict(self.state.ams_switch_inlet) if self.state.ams_switch_inlet else {}
         for ams_unit in merged_ams:
             ams_id = ams_unit.get("id")
             info = ams_unit.get("info")
@@ -2406,7 +2436,13 @@ class BambuMQTTClient:
                     # Extract 4 bits starting at bit 8 for extruder assignment
                     extruder_id = (info_val >> 8) & 0xF
                     if extruder_id == 0xE:
-                        # 0xE = uninitialized AMS, skip
+                        if fts_installed:
+                            inlet = {0: "B", 1: "A"}.get((info_val >> 24) & 0xF)
+                            if inlet is not None:
+                                previous = ams_switch_inlet.get(str(ams_id))
+                                ams_switch_inlet[str(ams_id)] = inlet
+                                if previous is not None and previous != inlet:
+                                    inlet_moves.append((int(ams_id), inlet))
                         continue
                     ams_extruder_map[str(ams_id)] = extruder_id
                     logger.debug(f"[{self.serial_number}] AMS {ams_id} info=0x{info} -> extruder {extruder_id}")
@@ -2416,6 +2452,11 @@ class BambuMQTTClient:
             self.state.raw_data["ams_extruder_map"] = ams_extruder_map
             self.state.ams_extruder_map = ams_extruder_map
             logger.debug("[%s] ams_extruder_map: %s", self.serial_number, ams_extruder_map)
+        if ams_switch_inlet:
+            self.state.ams_switch_inlet = ams_switch_inlet
+        for moved_ams_id, moved_inlet in inlet_moves:
+            if self.on_fts_inlet_change:
+                self.on_fts_inlet_change(moved_ams_id, moved_inlet)
 
         # Extract drying status from info hex string and dry_sf_reason per AMS unit
         # BambuStudio DevFilaSystem.cpp parses info bits:

@@ -35,7 +35,7 @@ async def test_pfus_cloud_unavailable_preserves_setting_id():
         "backend.app.api.routes.cloud.build_authenticated_cloud",
         AsyncMock(return_value=None),
     ):
-        tray_info_idx, setting_id, sub_brand = await resolve_slicer_filament(
+        tray_info_idx, setting_id, sub_brand, type_override = await resolve_slicer_filament(
             db=db,
             current_user=None,
             slicer_filament="PFUS990b6e19965353",
@@ -45,6 +45,7 @@ async def test_pfus_cloud_unavailable_preserves_setting_id():
     assert tray_info_idx == ""
     assert setting_id == "PFUS990b6e19965353"
     assert sub_brand is None
+    assert type_override is None
 
 
 @pytest.mark.asyncio
@@ -56,7 +57,7 @@ async def test_pfcn_cloud_unavailable_preserves_setting_id():
         "backend.app.api.routes.cloud.build_authenticated_cloud",
         AsyncMock(return_value=None),
     ):
-        tray_info_idx, setting_id, sub_brand = await resolve_slicer_filament(
+        tray_info_idx, setting_id, sub_brand, type_override = await resolve_slicer_filament(
             db=db,
             current_user=None,
             slicer_filament="PFCN1234567890",
@@ -66,6 +67,7 @@ async def test_pfcn_cloud_unavailable_preserves_setting_id():
     assert tray_info_idx == ""
     assert setting_id == "PFCN1234567890"
     assert sub_brand is None
+    assert type_override is None
 
 
 @pytest.mark.asyncio
@@ -82,7 +84,7 @@ async def test_pfus_cloud_resolves_filament_id_regression_guard():
         "backend.app.api.routes.cloud.build_authenticated_cloud",
         AsyncMock(return_value=cloud_mock),
     ):
-        tray_info_idx, setting_id, sub_brand = await resolve_slicer_filament(
+        tray_info_idx, setting_id, sub_brand, type_override = await resolve_slicer_filament(
             db=db,
             current_user=MagicMock(),
             slicer_filament="PFUS990b6e19965353",
@@ -92,6 +94,7 @@ async def test_pfus_cloud_resolves_filament_id_regression_guard():
     assert tray_info_idx == "P285e239"
     assert setting_id == "PFUS990b6e19965353"
     assert sub_brand == "Jayo PETG HF"
+    assert type_override is None
 
 
 @pytest.mark.asyncio
@@ -106,7 +109,7 @@ async def test_gfs_cloud_unavailable_resolves_via_normalize():
         "backend.app.api.routes.cloud.build_authenticated_cloud",
         AsyncMock(return_value=None),
     ):
-        tray_info_idx, setting_id, sub_brand = await resolve_slicer_filament(
+        tray_info_idx, setting_id, sub_brand, type_override = await resolve_slicer_filament(
             db=db,
             current_user=None,
             slicer_filament="GFSG02",
@@ -116,6 +119,7 @@ async def test_gfs_cloud_unavailable_resolves_via_normalize():
     assert tray_info_idx == "GFG02"
     assert setting_id == "GFSG02"
     assert sub_brand is None
+    assert type_override is None
 
 
 @pytest.mark.asyncio
@@ -130,7 +134,7 @@ async def test_literal_material_name_clears_both():
         "backend.app.api.routes.cloud.build_authenticated_cloud",
         AsyncMock(return_value=None),
     ):
-        tray_info_idx, setting_id, sub_brand = await resolve_slicer_filament(
+        tray_info_idx, setting_id, sub_brand, type_override = await resolve_slicer_filament(
             db=db,
             current_user=None,
             slicer_filament="PETG",
@@ -140,3 +144,4 @@ async def test_literal_material_name_clears_both():
     assert tray_info_idx == ""
     assert setting_id == ""
     assert sub_brand is None
+    assert type_override is None
