@@ -894,9 +894,7 @@ class PrintScheduler:
             )
             available_slots = max(0, upload_limit - len(self._inflight))
             deferred_ids = set(dispatch_ids[available_slots:])
-            pool_waiting_reason = (
-                f"Waiting for upload slot ({len(self._inflight)} of {upload_limit} in use)"
-            )
+            pool_waiting_reason = f"Waiting for upload slot ({len(self._inflight)} of {upload_limit} in use)"
             for item in items:
                 if item.id in deferred_ids:
                     item.waiting_reason = pool_waiting_reason
@@ -938,9 +936,7 @@ class PrintScheduler:
         scheduler ticks, so a slow printer cannot hold an unused slot hostage
         while other printers wait, and a worker failure cannot cancel siblings.
         """
-        occupied_printers = {
-            printer_id for _task, printer_id in self._inflight.values() if printer_id is not None
-        }
+        occupied_printers = {printer_id for _task, printer_id in self._inflight.values() if printer_id is not None}
         candidates: list[int] = []
         reserved_printers = set(occupied_printers)
         for item_id in item_ids:
