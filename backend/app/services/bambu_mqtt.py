@@ -1871,6 +1871,7 @@ class BambuMQTTClient:
                         A2L_LITE_NORMALIZED_AMS_ID,
                     )
                 self._has_a2l_am_unit = True
+
     def _handle_ams_data(self, ams_data):
         """Handle AMS data changes for Spoolman integration.
 
