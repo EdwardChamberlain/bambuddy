@@ -375,7 +375,7 @@ describe('SettingsPage', () => {
 
       expect(localStorage.setItem).toHaveBeenCalledWith(
         SIDEBAR_ORDER_KEY,
-        JSON.stringify(['ext-7', 'printers', 'inventory', 'archives', 'queue', 'projects', 'files', 'makerworld', 'profiles', 'maintenance', 'stats', 'settings']),
+        JSON.stringify(['ext-7', 'printers', 'inventory', 'archives', 'queue', 'pipelineRuns', 'projects', 'files', 'makerworld', 'profiles', 'maintenance', 'stats', 'settings']),
       );
     });
 
@@ -417,7 +417,7 @@ describe('SettingsPage', () => {
       expect(localStorage.setItem).toHaveBeenCalledWith(SIDEBAR_HIDDEN_SYSTEM_ITEMS_KEY, JSON.stringify([]));
       expect(localStorage.setItem).toHaveBeenCalledWith(
         SIDEBAR_ORDER_KEY,
-        JSON.stringify(['printers', 'inventory', 'archives', 'queue', 'projects', 'files', 'makerworld', 'profiles', 'maintenance', 'stats', 'settings', 'ext-7']),
+        JSON.stringify(['printers', 'inventory', 'archives', 'queue', 'pipelineRuns', 'projects', 'files', 'makerworld', 'profiles', 'maintenance', 'stats', 'settings', 'ext-7']),
       );
 
       const settingsRow = screen.getAllByText('Settings')
@@ -482,6 +482,7 @@ describe('SettingsPage', () => {
           'inventory',
           'archives',
           'queue',
+          'pipelineRuns',
           'projects',
           'files',
           'makerworld',

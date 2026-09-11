@@ -17,6 +17,7 @@ export default {
     printers: 'Impressoras',
     archives: 'Arquivos',
     queue: 'Fila de impressão',
+    pipelineRuns: 'Execuções de pipeline',
     stats: 'Estatísticas',
     profiles: 'Perfis',
     maintenance: 'Manutenção',
@@ -114,6 +115,8 @@ export default {
     now: 'Agora',
     collapse: 'Recolher',
     expand: 'Expandir',
+    previous: 'Anterior',
+    next: 'Próximo',
     viewArchive: 'Ver arquivo',
     viewInFileManager: 'Ver no Gerenciador de Arquivos',
     addedBy: 'Adicionado por {{username}}',
@@ -1032,6 +1035,60 @@ export default {
         cancelled: 'Cancelada',
         skipped: 'Ignorada',
       },
+    },
+  },
+
+  // Sticky upload-progress toast (#1625 follow-up)
+  dispatchToast: {
+    untitled: 'Trabalho de impressão',
+    startingPrints: 'Iniciando impressões',
+    progressSummary: '{{complete}}/{{total}} concluídas • Processando: {{processing}}',
+    expandDetails: 'Expandir detalhes do envio',
+    collapseDetails: 'Recolher detalhes do envio',
+    awaitingPrinter: 'Aguardando impressora…',
+    status: {
+      processing: 'Processando',
+      completed: 'Concluída',
+      failed: 'Falhou',
+    },
+    failed: {
+      generic: 'Falha no envio',
+      upload_failed: 'Falha ao enviar para a impressora',
+      start_command_failed: 'Impressora rejeitou o comando de início',
+    },
+    dismiss: 'Fechar',
+  },
+
+  // Pipeline Runs dashboard (#1425 PR C).
+  pipelineRuns: {
+    title: 'Execuções de pipeline',
+    loading: 'Carregando…',
+    empty: 'Nenhuma execução de pipeline ainda.',
+    filter: {
+      pipeline: 'Pipeline',
+      status: 'Status',
+      all: 'Todas',
+    },
+    copies: '{{n}} cópias',
+    failedCount: '{{n}} falharam',
+    copyN: 'Cópia {{n}}',
+    retryFailed: 'Repetir falhas',
+    retryOf: 'nova tentativa de #{{n}}',
+    pagination: '{{start}}–{{end}} de {{total}}',
+    toast: {
+      cancelled: 'Execução cancelada',
+      cancelFailed: 'Cancelamento falhou',
+      retryStarted: 'Nova tentativa iniciada',
+      retryFailed: 'Nova tentativa falhou',
+    },
+    jobStatus: {
+      pending: 'pendente',
+      awaiting_printer: 'aguardando impressora',
+      queued: 'na fila',
+      printing: 'imprimindo',
+      completed: 'concluída',
+      failed: 'falhou',
+      cancelled: 'cancelada',
     },
   },
 
@@ -2566,6 +2623,12 @@ export default {
       commandError: 'Falha ao enviar comando',
     },
 
+    pipelineLimits: {
+      title: 'Limites de pipelines do slicer',
+      maxCopiesLabel: 'Cópias máximas por execução',
+      maxCopiesDesc: 'Limite superior de cópias que operadores podem solicitar ao executar uma pipeline. O limite rígido no lado do servidor é 1000.',
+    },
+
     // Slicer Pipelines (#1425): list/edit/delete preset bundles users saved
     // from the Slice dialog. Lives in Settings → Workflow → Pipelines sub-tab.
     pipelines: {
@@ -2584,6 +2647,16 @@ export default {
         description: 'Descrição',
         targetPrinter: 'Impressora de destino',
         noTarget: '— Sem destino —',
+        targetKind: 'Tipo de destino',
+        targetKindSpecific: 'Impressora específica',
+        targetKindClass: 'Classe de impressora',
+        targetModelClass: 'Modelo de impressora',
+        fanoutStrategy: 'Estratégia de distribuição',
+        fanout: {
+          max_parallel: 'Máximo paralelo — distribuir em qualquer impressora ociosa compatível',
+          round_robin: 'Round robin — alternar entre impressoras elegíveis',
+          fill_one_first: 'Encher uma primeiro — fixar todas as cópias em uma impressora',
+        },
       },
       action: {
         save: 'Salvar',
@@ -2615,6 +2688,7 @@ export default {
           in_progress: 'imprimindo',
           completed: 'concluída',
           failed: 'falhou',
+          partial_failure: 'falha parcial',
           cancelled: 'cancelada',
         },
       },
@@ -3854,6 +3928,9 @@ export default {
       empty: 'Ainda não há pipelines salvas. Abra o diálogo Cortar e clique em "Salvar como pipeline" para criar uma.',
       noTarget: 'Sem impressora de destino',
       noTargetMessage: 'Esta pipeline não tem impressora de destino. Abra-a em Configurações para escolher uma.',
+      copies: 'Cópias',
+      copiesHint: 'máx {{n}}',
+      classTarget: 'Qualquer {{model}}',
       toast: {
         started: 'Execução da pipeline iniciada',
         failed: 'Não foi possível iniciar a execução',
@@ -3867,6 +3944,8 @@ export default {
         filamentColor: 'Slot de filamento {{slot}}: cor diferente (esperado {{expected}}, AMS tem {{actual}})',
         amsSlotMissing: 'Slot AMS {{slot}} indisponível nesta impressora',
         filamentUnverified: 'Slot de filamento {{slot}} vem de uma predefinição da nuvem / padrão e não pôde ser verificado estaticamente.',
+        noClassMatches: 'Nenhuma impressora nesta instalação corresponde à classe de modelo de destino da pipeline ({{expected}}).',
+        classNotSet: 'O destino da pipeline está configurado como classe de impressora, mas nenhum modelo foi escolhido.',
       },
     },
   },
