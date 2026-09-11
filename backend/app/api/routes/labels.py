@@ -63,7 +63,7 @@ class LabelRequest(BaseModel):
     starting_position: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
-    def validate_starting_position(self) -> "LabelRequest":
+    def validate_starting_position(self) -> LabelRequest:
         capacity = get_sheet_capacity(self.template)
         if capacity is None and self.starting_position != 1:
             raise ValueError("starting_position is only supported for sheet label templates")
