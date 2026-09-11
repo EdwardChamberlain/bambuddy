@@ -49,6 +49,7 @@ from backend.app.utils.filament_types import is_material_name
 
 logger = logging.getLogger(__name__)
 
+
 def _preset_filament_type(raw: object) -> str | None:
     """Read a preset filament type stored as a string or one-item list."""
     if isinstance(raw, list):
@@ -203,9 +204,7 @@ async def resolve_slicer_filament(
     # Valid tray_info_idx values: "GF" + letter + digits (Bambu official) or
     # "P" followed by hex (user/local presets, NOT "PFUS" or "PFCN").
     if tray_info_idx and (
-        is_material_name(tray_info_idx)
-        or tray_info_idx.startswith("PFUS")
-        or tray_info_idx.startswith("PFCN")
+        is_material_name(tray_info_idx) or tray_info_idx.startswith("PFUS") or tray_info_idx.startswith("PFCN")
     ):
         tray_info_idx = ""
         # Preserve setting_id when it's still a valid slicer reference

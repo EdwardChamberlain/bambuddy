@@ -1537,6 +1537,8 @@ async def on_fts_inlet_change(printer_id: int, ams_id: int, inlet: str):
                 )
     except Exception as e:
         logger.warning("[Printer %s] Could not re-apply K-profiles after inlet move: %s", printer_id, e)
+
+
 async def on_ams_change(printer_id: int, ams_data: list):
     """Handle AMS data changes - sync to Spoolman if enabled and auto mode."""
     logger = logging.getLogger(__name__)
