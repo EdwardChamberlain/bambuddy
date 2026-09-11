@@ -55,6 +55,7 @@ from backend.app.api.routes import (
     projects,
     settings as settings_routes,
     slice_jobs,
+    slicer_pipelines,
     slicer_presets,
     smart_plugs,
     spoolbuddy,
@@ -7336,6 +7337,7 @@ app.include_router(library.router, prefix=app_settings.api_prefix)
 app.include_router(library_tags.router, prefix=app_settings.api_prefix)
 app.include_router(library_trash.router, prefix=app_settings.api_prefix)
 app.include_router(slice_jobs.router, prefix=app_settings.api_prefix)
+app.include_router(slicer_pipelines.router, prefix=app_settings.api_prefix)
 app.include_router(slicer_presets.router, prefix=app_settings.api_prefix)
 app.include_router(archive_purge.router, prefix=app_settings.api_prefix)
 app.include_router(makerworld.router, prefix=app_settings.api_prefix)
