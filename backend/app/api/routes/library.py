@@ -4164,10 +4164,9 @@ async def slice_library_file(
     model_bytes = src_path.read_bytes()
     folder_id = lib_file.folder_id
     source_lib_file_id = lib_file.id
-    # API-keyed callers get None from the auth gate (auth.py keeps that
-    # behaviour to avoid a wider scope expansion). Fall back to the API
-    # key's owner so cloud-preset resolution can read the stored
-    # cloud_token (#1182 follow-up).
+    # API-keyed callers get the key's owner from the auth gate. Fall back to the
+    # API key's owner so cloud-preset resolution can read the stored cloud_token
+    # (#1182 follow-up).
     cloud_token_user = current_user or owner_user or api_key_cloud_owner
     user_id = cloud_token_user.id if cloud_token_user else None
 

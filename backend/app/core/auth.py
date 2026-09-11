@@ -101,16 +101,10 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     # can_queue — queue write ops + reprint (which enqueues an existing archive)
     Permission.QUEUE_CREATE: "can_queue",
     Permission.QUEUE_UPDATE_OWN: "can_queue",
-    # These ALL permissions also gate legitimate global queue operations
-    # (batch cancellation/reorder and archive reprint). Ownership-aware routes
-    # deliberately check the corresponding OWN permission below instead.
-    Permission.QUEUE_UPDATE_ALL: "can_queue",
     Permission.QUEUE_DELETE_OWN: "can_queue",
-    Permission.QUEUE_DELETE_ALL: "can_queue",
     Permission.QUEUE_REORDER: "can_queue",
     Permission.QUEUE_INSERT_TOP: "can_queue",
     Permission.ARCHIVES_REPRINT_OWN: "can_queue",
-    Permission.ARCHIVES_REPRINT_ALL: "can_queue",
     # can_control_printer — physical-world side effects on hardware
     Permission.PRINTERS_CONTROL: "can_control_printer",
     Permission.PRINTERS_FILES: "can_control_printer",
@@ -119,16 +113,15 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     Permission.SMART_PLUGS_CONTROL: "can_control_printer",
     # can_manage_library — file-manager scope (upload/rename/delete library
     # entries + MakerWorld import which downloads files into the library).
-    # Both ownership variants retain the category scope for legacy/global
-    # endpoints. The ownership dependency resolves the key's user and checks
-    # the OWN permission, so row-level routes remain owner-scoped.
+    # Only OWN ownership variants are exposed to API keys. The ownership
+    # dependency resolves the key's user and applies the normal per-row check;
+    # ALL variants remain admin/JWT-only because API keys have no all-row
+    # capability.
     # LIBRARY_PURGE stays admin-only as a genuinely destructive op that
     # bypasses the soft-delete window.
     Permission.LIBRARY_UPLOAD: "can_manage_library",
     Permission.LIBRARY_UPDATE_OWN: "can_manage_library",
-    Permission.LIBRARY_UPDATE_ALL: "can_manage_library",
     Permission.LIBRARY_DELETE_OWN: "can_manage_library",
-    Permission.LIBRARY_DELETE_ALL: "can_manage_library",
     Permission.MAKERWORLD_IMPORT: "can_manage_library",
     # can_manage_inventory — inventory write scope. Covers the documented
     # spool/catalog/forecast write surface AND the SpoolBuddy kiosk endpoints
@@ -140,6 +133,16 @@ _APIKEY_SCOPE_BY_PERMISSION: dict[Permission, str] = {
     Permission.INVENTORY_UPDATE: "can_manage_inventory",
     Permission.INVENTORY_DELETE: "can_manage_inventory",
     Permission.INVENTORY_FORECAST_WRITE: "can_manage_inventory",
+    # Print-history curation is administrative for API keys. Purge remains
+    # administrative because it removes the statistics contribution (#1888).
+    Permission.ARCHIVES_UPDATE_OWN: "can_manage_archives",
+    Permission.ARCHIVES_DELETE_OWN: "can_manage_archives",
+    # Projects are a separate explicit global capability. Project rows do not
+    # carry an owner field, so this is intentionally not routed through the
+    # own/all ownership dependency used by archives and library files.
+    Permission.PROJECTS_CREATE: "can_manage_projects",
+    Permission.PROJECTS_UPDATE: "can_manage_projects",
+    Permission.PROJECTS_DELETE: "can_manage_projects",
     # can_access_cloud — narrow opt-in scope, gated by the router-level
     # ``_cloud_api_key_gate`` and additionally enforced here so the route-
     # level ``cloud_caller(Permission.CLOUD_AUTH)`` dep also fails closed
@@ -181,25 +184,25 @@ _APIKEY_DENIED_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.GITHUB_BACKUP,
         Permission.GITHUB_RESTORE,
         Permission.FIRMWARE_UPDATE,
-        # Resource administration (printer/project/filament/maintenance/k-profile/etc CRUD).
+        # Resource administration (printer/filament/maintenance/k-profile/etc CRUD).
         # API keys with the operational scopes can read these resources via
         # *_READ permissions but cannot mutate the catalog/registry itself.
         Permission.PRINTERS_CREATE,
         Permission.PRINTERS_UPDATE,
         Permission.PRINTERS_DELETE,
         Permission.ARCHIVES_CREATE,
-        Permission.ARCHIVES_UPDATE_OWN,
         Permission.ARCHIVES_UPDATE_ALL,
-        Permission.ARCHIVES_DELETE_OWN,
         Permission.ARCHIVES_DELETE_ALL,
+        Permission.QUEUE_UPDATE_ALL,
+        Permission.QUEUE_DELETE_ALL,
+        Permission.ARCHIVES_REPRINT_ALL,
+        Permission.LIBRARY_UPDATE_ALL,
+        Permission.LIBRARY_DELETE_ALL,
         Permission.ARCHIVES_PURGE,
-        # Library purge remains denied; row-level file operations use the
-        # owner-resolving ownership dependency even though their ALL
-        # permissions retain the category scope above.
+        # Library ALL-ownership operations stay denied. OWN operations are
+        # allowed through the owner-resolving ownership dependency; folder and
+        # batch operations that require ALL remain admin/JWT-only.
         Permission.LIBRARY_PURGE,
-        Permission.PROJECTS_CREATE,
-        Permission.PROJECTS_UPDATE,
-        Permission.PROJECTS_DELETE,
         Permission.FILAMENTS_CREATE,
         Permission.FILAMENTS_UPDATE,
         Permission.FILAMENTS_DELETE,
@@ -238,7 +241,13 @@ def _resolve_apikey_scope(perm_string: str) -> str | None:
     return _APIKEY_SCOPE_BY_PERMISSION.get(perm)
 
 
-def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, require_any: bool = False) -> None:
+def _check_apikey_permissions(
+    api_key: APIKey,
+    perm_strings: list[str],
+    *,
+    owner: User | None = None,
+    require_any: bool = False,
+) -> None:
     """Raise 403 unless ``api_key`` is allowed to use ``perm_strings``.
 
     Allowlist semantics: every requested permission MUST be present in
@@ -249,6 +258,10 @@ def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, requi
     ``require_permission`` / ``require_permission_if_auth_enabled``).
     When ``require_any=True``, only one needs to pass (mirrors
     ``require_any_permission_if_auth_enabled``).
+
+    When an owned API key is used, the owner's normal group permissions are
+    an additional boundary. Legacy ownerless keys remain scope-only for
+    backwards compatibility.
     """
     if not perm_strings:
         # Defensive: empty perm list means the dep is auth-only, not perm-gated.
@@ -271,6 +284,11 @@ def _check_apikey_permissions(api_key: APIKey, perm_strings: list[str], *, requi
             failure = HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"API key does not have '{scope_attr}' permission",
+            )
+        elif owner is not None and not owner.has_permission(perm_str):
+            failure = HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"API key owner does not have '{perm_str}' permission",
             )
         else:
             failure = None
@@ -329,12 +347,18 @@ def require_energy_cost_update():
                         detail="Invalid API key",
                         headers={"WWW-Authenticate": "Bearer"},
                     )
+                if api_key.user_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="This API-keyed operation requires an active API key owner",
+                    )
+                owner = await _resolve_api_key_permission_owner(db, api_key)
                 if not api_key.can_update_energy_cost:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="API key does not have 'update_energy_cost' permission",
                     )
-                return None
+                return owner
 
             # JWT path
             if credentials is None:
@@ -894,6 +918,39 @@ async def _user_from_api_key(db: AsyncSession, api_key: APIKey) -> User | None:
     return user
 
 
+async def _resolve_api_key_permission_owner(db: AsyncSession, api_key: APIKey) -> User | None:
+    """Resolve an owned key's active user for permission narrowing.
+
+    Ownerless keys predate API-key ownership and intentionally remain
+    scope-only. An owned key must never fall back to anonymous scope access
+    when its owner is missing or inactive.
+    """
+    if api_key.user_id is None:
+        return None
+
+    result = await db.execute(select(User).where(User.id == api_key.user_id).options(selectinload(User.groups)))
+    owner = result.scalar_one_or_none()
+    if owner is None or not owner.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key owner is deactivated or no longer exists",
+        )
+    return owner
+
+
+async def _authorize_api_key(
+    db: AsyncSession,
+    api_key: APIKey,
+    perm_strings: list[str],
+    *,
+    require_any: bool = False,
+) -> User | None:
+    """Check API-key scopes and, for owned keys, the owner's permissions."""
+    owner = await _resolve_api_key_permission_owner(db, api_key)
+    _check_apikey_permissions(api_key, perm_strings, owner=owner, require_any=require_any)
+    return owner
+
+
 async def resolve_api_key_owner(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
@@ -1333,6 +1390,25 @@ async def caller_is_api_key(
     return credentials is not None and credentials.credentials.startswith("bb_")
 
 
+async def require_api_key_owner(
+    api_key_owner: User | None = Depends(resolve_api_key_owner),
+    is_api_key: bool = Depends(caller_is_api_key),
+) -> User | None:
+    """Return the active API-key owner, rejecting legacy ownerless keys.
+
+    Ownership-scoped routes must not treat a legacy ownerless key as an
+    anonymous/global caller. JWT and auth-disabled callers still receive None;
+    their normal route permissions retain the existing single-tenant/global
+    semantics.
+    """
+    if is_api_key and api_key_owner is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This API-keyed operation requires an active API key owner",
+        )
+    return api_key_owner
+
+
 def check_permission(api_key: APIKey, permission: str) -> None:
     """Check if API key has the required permission.
 
@@ -1420,7 +1496,7 @@ def require_permission(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, perm_strings)
+                    await _authorize_api_key(db, api_key, perm_strings)
                     return None  # API key valid, allow access
 
             credentials_exception = HTTPException(
@@ -1437,7 +1513,7 @@ def require_permission(*permissions: str | Permission):
             if token.startswith("bb_"):
                 api_key = await _validate_api_key(db, token)
                 if api_key:
-                    _check_apikey_permissions(api_key, perm_strings)
+                    await _authorize_api_key(db, api_key, perm_strings)
                     return None  # API key valid, allow access
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1510,7 +1586,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, perm_strings)
+                    await _authorize_api_key(db, api_key, perm_strings)
                     return None  # API key valid, allow access
 
             # Check for Bearer token (could be JWT or API key)
@@ -1520,7 +1596,7 @@ def require_permission_if_auth_enabled(*permissions: str | Permission):
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, perm_strings)
+                        await _authorize_api_key(db, api_key, perm_strings)
                         return None  # API key valid, allow access
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1613,7 +1689,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
                     # GHSA-r2qv-8222-hqg3: previously returned None unconditionally,
                     # letting any valid API key satisfy admin "any-of" route
                     # dependencies. require_any → at-least-one must pass the scope check.
-                    _check_apikey_permissions(api_key, perm_strings, require_any=True)
+                    await _authorize_api_key(db, api_key, perm_strings, require_any=True)
                     return None
 
             if credentials is not None:
@@ -1621,7 +1697,7 @@ def require_any_permission_if_auth_enabled(*permissions: str | Permission):
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, perm_strings, require_any=True)
+                        await _authorize_api_key(db, api_key, perm_strings, require_any=True)
                         return None
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1722,10 +1798,10 @@ def require_ownership_permission(
     - User with ``own_permission`` can only modify items where created_by_id == user.id
     - Ownerless items (created_by_id = null) require ``all_permission``
     - API keys (via X-API-Key header or Bearer bb_xxx) must satisfy the
-      ``own_permission``'s scope flag and are evaluated as the owner of the
-      key. API keys are intentionally own-only: the key record has no
+      ``own_permission``'s API-key scope flag and are evaluated as the owner
+      of the key. API keys are intentionally own-only: the key record has no
       all-ownership capability, and an ownerless legacy key cannot safely be
-      used on an ownership-scoped route. Pre-GHSA-r2qv-8222-hqg3 this
+      used on an ownership-scoped route. Before the GHSA-r2qv-8222-hqg3 fix this
       returned ``(None, True)`` for any valid key with no scope check.
 
     Returns:
@@ -1758,8 +1834,7 @@ def require_ownership_permission(
             if x_api_key:
                 api_key = await _validate_api_key(db, x_api_key)
                 if api_key:
-                    _check_apikey_permissions(api_key, [own_perm])
-                    owner = await _user_from_api_key(db, api_key)
+                    owner = await _authorize_api_key(db, api_key, [own_perm])
                     if owner is None:
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -1774,8 +1849,7 @@ def require_ownership_permission(
                 if token.startswith("bb_"):
                     api_key = await _validate_api_key(db, token)
                     if api_key:
-                        _check_apikey_permissions(api_key, [own_perm])
-                        owner = await _user_from_api_key(db, api_key)
+                        owner = await _authorize_api_key(db, api_key, [own_perm])
                         if owner is None:
                             raise HTTPException(
                                 status_code=status.HTTP_403_FORBIDDEN,

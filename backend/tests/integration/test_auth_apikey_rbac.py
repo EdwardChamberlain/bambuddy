@@ -81,6 +81,24 @@ class TestApiKeyRbacAllowed:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_api_key_can_create_project_with_project_scope(
+        self, async_client: AsyncClient, db_session, api_key_data
+    ):
+        """The advertised project scope must reach the project route."""
+        from backend.app.models.settings import Settings
+
+        db_session.add(Settings(key="auth_enabled", value="true"))
+        await db_session.commit()
+
+        resp = await async_client.post(
+            "/api/v1/projects/",
+            json={"name": "API-key project"},
+            headers={"X-API-Key": api_key_data},
+        )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_api_key_can_access_inventory_read(
         self, async_client: AsyncClient, db_session, api_key_data, spoolman_settings
     ):
@@ -137,6 +155,11 @@ class TestApiKeyDenylistIntegrity:
             Permission.GITHUB_BACKUP,
             Permission.GITHUB_RESTORE,
             Permission.FIRMWARE_UPDATE,
+            Permission.ARCHIVES_CREATE,
+            Permission.ARCHIVES_UPDATE_ALL,
+            Permission.ARCHIVES_DELETE_ALL,
+            Permission.LIBRARY_UPDATE_ALL,
+            Permission.LIBRARY_DELETE_ALL,
         }
         missing = expected_denied - _APIKEY_DENIED_PERMISSIONS
         assert not missing, (
@@ -215,6 +238,8 @@ class TestApiKeyScopeAllowlist:
             "can_control_printer",
             "can_manage_library",
             "can_manage_inventory",
+            "can_manage_archives",
+            "can_manage_projects",
             "can_access_cloud",
         }
         used_flags = set(_APIKEY_SCOPE_BY_PERMISSION.values())
@@ -241,6 +266,8 @@ class TestApiKeyScopeAllowlist:
             "can_control_printer",
             "can_manage_library",
             "can_manage_inventory",
+            "can_manage_archives",
+            "can_manage_projects",
             "can_access_cloud",
         ],
     )
@@ -268,12 +295,24 @@ class _FakeApiKey:
         can_control_printer=False,
         can_manage_library=False,
         can_manage_inventory=False,
+        can_manage_archives=False,
+        can_manage_projects=False,
     ):
         self.can_read_status = can_read_status
         self.can_queue = can_queue
         self.can_control_printer = can_control_printer
         self.can_manage_library = can_manage_library
         self.can_manage_inventory = can_manage_inventory
+        self.can_manage_archives = can_manage_archives
+        self.can_manage_projects = can_manage_projects
+
+
+class _FakeOwner:
+    def __init__(self, *permissions: str):
+        self.permissions = set(permissions)
+
+    def has_permission(self, permission: str) -> bool:
+        return permission in self.permissions
 
 
 class TestCheckApiKeyPermissionsMatrix:
@@ -294,27 +333,31 @@ class TestCheckApiKeyPermissionsMatrix:
         ("WEBSOCKET_CONNECT", "can_read_status", "websocket subscribe"),
         # can_queue
         ("QUEUE_CREATE", "can_queue", "add queue item"),
-        ("QUEUE_DELETE_ALL", "can_queue", "delete any queue item"),
-        ("ARCHIVES_REPRINT_ALL", "can_queue", "reprint an archive"),
+        ("QUEUE_DELETE_OWN", "can_queue", "delete own queue item"),
+        ("ARCHIVES_REPRINT_OWN", "can_queue", "reprint own archive"),
         # can_control_printer
         ("PRINTERS_CONTROL", "can_control_printer", "start/stop print"),
         ("PRINTERS_FILES", "can_control_printer", "send file to printer"),
         ("SMART_PLUGS_CONTROL", "can_control_printer", "smart plug on/off"),
-        # can_manage_library — OWN and ALL ownership variants both fold into
-        # the same scope (#1832): API keys have no per-row ownership identity,
-        # so splitting OWN/ALL across allowlist/denylist made the curation
-        # surface unreachable. PURGE stays admin-only.
+        # can_manage_library — API keys are restricted to their owner's rows;
+        # ALL-ownership operations stay admin/JWT-only.
         ("LIBRARY_UPLOAD", "can_manage_library", "upload library file"),
         ("LIBRARY_UPDATE_OWN", "can_manage_library", "rename own library file"),
-        ("LIBRARY_UPDATE_ALL", "can_manage_library", "rename any library file"),
         ("LIBRARY_DELETE_OWN", "can_manage_library", "delete own library file"),
-        ("LIBRARY_DELETE_ALL", "can_manage_library", "delete any library file"),
         ("MAKERWORLD_IMPORT", "can_manage_library", "import from MakerWorld"),
         # can_manage_inventory
         ("INVENTORY_CREATE", "can_manage_inventory", "create spool record"),
         ("INVENTORY_UPDATE", "can_manage_inventory", "update spool / SpoolBuddy kiosk write"),
         ("INVENTORY_DELETE", "can_manage_inventory", "delete spool record"),
         ("INVENTORY_FORECAST_WRITE", "can_manage_inventory", "update forecast SKU settings"),
+        # can_manage_archives — archive CRUD, excluding destructive purge.
+        ("ARCHIVES_UPDATE_OWN", "can_manage_archives", "edit own archive"),
+        ("ARCHIVES_DELETE_OWN", "can_manage_archives", "delete own archive"),
+        # can_manage_projects — project CRUD is an explicit global scope
+        # because Project has no row-owner field.
+        ("PROJECTS_CREATE", "can_manage_projects", "create project"),
+        ("PROJECTS_UPDATE", "can_manage_projects", "update project"),
+        ("PROJECTS_DELETE", "can_manage_projects", "delete project"),
     ]
 
     _ADMIN_CASES = [
@@ -327,8 +370,15 @@ class TestCheckApiKeyPermissionsMatrix:
         "FIRMWARE_UPDATE",
         # Unmapped administrative (allowlist fail-closed catches these too)
         "PRINTERS_CREATE",
-        # LIBRARY_DELETE_ALL / LIBRARY_UPDATE_ALL moved to can_manage_library
-        # under #1832 — covered by the _SCOPE_CASES matrix above.
+        # Ownership ALL variants remain JWT/admin-only; API keys are own-only.
+        "QUEUE_UPDATE_ALL",
+        "QUEUE_DELETE_ALL",
+        "ARCHIVES_REPRINT_ALL",
+        "LIBRARY_UPDATE_ALL",
+        "LIBRARY_DELETE_ALL",
+        "ARCHIVES_CREATE",
+        "ARCHIVES_UPDATE_ALL",
+        "ARCHIVES_DELETE_ALL",
         "LIBRARY_PURGE",
         "DISCOVERY_SCAN",
     ]
@@ -354,7 +404,15 @@ class TestCheckApiKeyPermissionsMatrix:
         # Wrong flag set, required flag off → 403 (no cross-scope leakage)
         other_flags = {
             f
-            for f in ("can_read_status", "can_queue", "can_control_printer", "can_manage_library")
+            for f in (
+                "can_read_status",
+                "can_queue",
+                "can_control_printer",
+                "can_manage_library",
+                "can_manage_inventory",
+                "can_manage_archives",
+                "can_manage_projects",
+            )
             if f != required_flag
         }
         for other in other_flags:
@@ -387,6 +445,22 @@ class TestCheckApiKeyPermissionsMatrix:
         with pytest.raises(HTTPException) as exc:
             _check_apikey_permissions(all_flags, ["bogus:nonexistent"])
         assert exc.value.status_code == 403
+
+    def test_owned_key_also_requires_owner_permission(self):
+        """An owned key cannot outrank the permissions of its active owner."""
+        from fastapi import HTTPException
+
+        from backend.app.core.auth import _check_apikey_permissions
+        from backend.app.core.permissions import Permission
+
+        key = _FakeApiKey(can_manage_projects=True)
+        permission = Permission.PROJECTS_UPDATE.value
+        _check_apikey_permissions(key, [permission], owner=_FakeOwner(permission))
+
+        with pytest.raises(HTTPException) as exc:
+            _check_apikey_permissions(key, [permission], owner=_FakeOwner())
+        assert exc.value.status_code == 403
+        assert "owner" in exc.value.detail.lower()
 
     def test_empty_perm_list_is_403(self):
         """Defence-in-depth: an empty perm list must not silently allow."""

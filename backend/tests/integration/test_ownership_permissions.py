@@ -111,6 +111,84 @@ class TestOwnershipPermissionsSetup:
 class TestArchiveOwnershipPermissions(TestOwnershipPermissionsSetup):
     """Tests for archive ownership-based permissions."""
 
+    @pytest.fixture
+    async def operator_api_key(self, db_session, auth_setup):
+        """Create a fully-scoped API key owned by operator1."""
+        from backend.app.core.auth import generate_api_key
+        from backend.app.models.api_key import APIKey
+
+        full_key, key_hash, key_prefix = generate_api_key()
+        db_session.add(
+            APIKey(
+                name="operator-archive-key",
+                key_hash=key_hash,
+                key_prefix=key_prefix,
+                user_id=auth_setup["operator_user"]["id"],
+                can_read_status=True,
+                can_manage_archives=True,
+            )
+        )
+        await db_session.commit()
+        return full_key
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_api_key_cannot_read_another_users_archive(
+        self, async_client: AsyncClient, auth_setup, archive_factory, printer_factory, operator_api_key
+    ):
+        printer = await printer_factory()
+        archive = await archive_factory(
+            printer.id,
+            print_name="Operator 2 archive",
+            created_by_id=auth_setup["operator2_user"]["id"],
+        )
+
+        response = await async_client.get(
+            f"/api/v1/archives/{archive.id}",
+            headers={"X-API-Key": operator_api_key},
+        )
+
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_api_key_cannot_update_another_users_archive(
+        self, async_client: AsyncClient, auth_setup, archive_factory, printer_factory, operator_api_key
+    ):
+        printer = await printer_factory()
+        archive = await archive_factory(
+            printer.id,
+            print_name="Operator 2 archive",
+            created_by_id=auth_setup["operator2_user"]["id"],
+        )
+
+        response = await async_client.patch(
+            f"/api/v1/archives/{archive.id}",
+            headers={"X-API-Key": operator_api_key},
+            json={"print_name": "Should remain unchanged"},
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_api_key_cannot_delete_another_users_archive(
+        self, async_client: AsyncClient, auth_setup, archive_factory, printer_factory, operator_api_key
+    ):
+        printer = await printer_factory()
+        archive = await archive_factory(
+            printer.id,
+            print_name="Operator 2 archive",
+            created_by_id=auth_setup["operator2_user"]["id"],
+        )
+
+        response = await async_client.delete(
+            f"/api/v1/archives/{archive.id}",
+            headers={"X-API-Key": operator_api_key},
+        )
+
+        assert response.status_code == 403
+
     # ========================================================================
     # DELETE permissions
     # ========================================================================
@@ -707,6 +785,60 @@ class TestQueueOwnershipPermissions(TestOwnershipPermissionsSetup):
 
 class TestLibraryOwnershipPermissions(TestOwnershipPermissionsSetup):
     """Tests for library file ownership-based permissions."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_read_own_cannot_poll_another_users_slice_job(
+        self, async_client: AsyncClient, auth_setup, db_session
+    ):
+        """Slice-job results must follow the source owner's read boundary."""
+        from backend.app.core.auth import generate_api_key
+        from backend.app.models.api_key import APIKey
+        from backend.app.services.slice_dispatch import SliceJob, slice_dispatch
+
+        full_key, key_hash, key_prefix = generate_api_key()
+        db_session.add(
+            APIKey(
+                name="slice-job-reader-key",
+                key_hash=key_hash,
+                key_prefix=key_prefix,
+                user_id=auth_setup["operator2_user"]["id"],
+                can_read_status=True,
+            )
+        )
+        await db_session.commit()
+
+        job = SliceJob(
+            id=990001,
+            kind="library_file",
+            source_id=123,
+            source_name="operator1-private.3mf",
+            owner_id=auth_setup["operator_user"]["id"],
+            status="completed",
+            result={"library_file_id": 456},
+        )
+        slice_dispatch._jobs[job.id] = job
+        try:
+            jwt_response = await async_client.get(
+                f"/api/v1/slice-jobs/{job.id}",
+                headers={"Authorization": f"Bearer {auth_setup['operator2_token']}"},
+            )
+            assert jwt_response.status_code == 404
+
+            api_key_response = await async_client.get(
+                f"/api/v1/slice-jobs/{job.id}",
+                headers={"X-API-Key": full_key},
+            )
+            assert api_key_response.status_code == 404
+
+            owner_response = await async_client.get(
+                f"/api/v1/slice-jobs/{job.id}",
+                headers={"Authorization": f"Bearer {auth_setup['operator_token']}"},
+            )
+            assert owner_response.status_code == 200
+            assert owner_response.json()["source_name"] == "operator1-private.3mf"
+        finally:
+            slice_dispatch._jobs.pop(job.id, None)
 
     @pytest.fixture
     async def library_file_factory(self, db_session):
@@ -1646,3 +1778,137 @@ class TestSliceOwnershipPermissions(TestOwnershipPermissionsSetup):
             headers={"Authorization": f"Bearer {auth_setup['admin_token']}"},
         )
         assert admin.status_code == 200
+
+
+class TestProjectOwnershipBoundaries(TestOwnershipPermissionsSetup):
+    """Project child routes must retain the API-key owner's row boundary."""
+
+    @pytest.fixture
+    async def project_api_key(self, db_session, auth_setup):
+        from backend.app.core.auth import generate_api_key
+        from backend.app.models.api_key import APIKey
+
+        full_key, key_hash, key_prefix = generate_api_key()
+        db_session.add(
+            APIKey(
+                name="operator-project-key",
+                key_hash=key_hash,
+                key_prefix=key_prefix,
+                user_id=auth_setup["operator_user"]["id"],
+                can_read_status=True,
+                can_manage_projects=True,
+            )
+        )
+        await db_session.commit()
+        return full_key
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_api_key_project_routes_only_expose_owned_children(
+        self,
+        async_client: AsyncClient,
+        db_session,
+        auth_setup,
+        archive_factory,
+        printer_factory,
+        project_api_key,
+    ):
+        from backend.app.models.print_queue import PrintQueueItem
+        from backend.app.models.project import Project
+
+        project = Project(name="Shared project")
+        db_session.add(project)
+        await db_session.flush()
+
+        child = Project(name="Shared child", parent_id=project.id, target_count=1)
+        db_session.add(child)
+        await db_session.flush()
+
+        printer = await printer_factory()
+        owned_archive = await archive_factory(
+            printer.id,
+            print_name="Owned archive",
+            created_by_id=auth_setup["operator_user"]["id"],
+            project_id=project.id,
+        )
+        other_archive = await archive_factory(
+            printer.id,
+            print_name="Other archive",
+            created_by_id=auth_setup["operator2_user"]["id"],
+            project_id=project.id,
+        )
+        await archive_factory(
+            printer.id,
+            print_name="Owned child archive",
+            status="failed",
+            created_by_id=auth_setup["operator_user"]["id"],
+            project_id=child.id,
+        )
+        await archive_factory(
+            printer.id,
+            print_name="Other child archive",
+            status="completed",
+            created_by_id=auth_setup["operator2_user"]["id"],
+            project_id=child.id,
+        )
+        owned_item = PrintQueueItem(
+            printer_id=printer.id,
+            archive_id=owned_archive.id,
+            project_id=project.id,
+            created_by_id=auth_setup["operator_user"]["id"],
+            status="pending",
+            position=1,
+        )
+        other_item = PrintQueueItem(
+            printer_id=printer.id,
+            archive_id=other_archive.id,
+            project_id=project.id,
+            created_by_id=auth_setup["operator2_user"]["id"],
+            status="pending",
+            position=2,
+        )
+        db_session.add_all([owned_item, other_item])
+        await db_session.commit()
+
+        headers = {"X-API-Key": project_api_key}
+        archives_response = await async_client.get(f"/api/v1/projects/{project.id}/archives", headers=headers)
+        assert archives_response.status_code == 200, archives_response.text
+        assert [item["id"] for item in archives_response.json()] == [owned_archive.id]
+
+        queue_response = await async_client.get(f"/api/v1/projects/{project.id}/queue", headers=headers)
+        assert queue_response.status_code == 200, queue_response.text
+        assert [item["id"] for item in queue_response.json()] == [owned_item.id]
+
+        timeline_response = await async_client.get(f"/api/v1/projects/{project.id}/timeline", headers=headers)
+        assert timeline_response.status_code == 200, timeline_response.text
+        timeline = timeline_response.json()
+        assert all((event.get("metadata") or {}).get("archive_id") != other_archive.id for event in timeline)
+        assert all((event.get("metadata") or {}).get("queue_item_id") != other_item.id for event in timeline)
+
+        list_response = await async_client.get("/api/v1/projects/", headers=headers)
+        assert list_response.status_code == 200, list_response.text
+        listed_project = next(item for item in list_response.json() if item["id"] == project.id)
+        assert listed_project["archive_count"] == 1
+        assert listed_project["queue_count"] == 1
+        assert [item["id"] for item in listed_project["archives"]] == [owned_archive.id]
+
+        detail_response = await async_client.get(f"/api/v1/projects/{project.id}", headers=headers)
+        assert detail_response.status_code == 200, detail_response.text
+        detail = detail_response.json()
+        assert detail["stats"]["total_archives"] == 1
+        assert detail["stats"]["queued_prints"] == 1
+        assert detail["stats"]["completed_prints"] == 1
+        assert len(detail["children"]) == 1
+        assert detail["children"][0]["id"] == child.id
+        assert detail["children"][0]["progress_percent"] == 0.0
+
+        remove_response = await async_client.post(
+            f"/api/v1/projects/{project.id}/remove-archives",
+            headers=headers,
+            json={"archive_ids": [other_archive.id]},
+        )
+        assert remove_response.status_code == 200, remove_response.text
+        assert "Removed 0" in remove_response.json()["message"]
+
+        await db_session.refresh(other_archive)
+        assert other_archive.project_id == project.id

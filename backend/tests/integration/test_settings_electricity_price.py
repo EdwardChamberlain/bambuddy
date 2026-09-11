@@ -142,6 +142,26 @@ class TestElectricityPriceEndpoint:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_api_key_with_deactivated_owner_rejected(self, async_client: AsyncClient, db_session: AsyncSession):
+        """An enabled energy scope must not outlive its API-key owner."""
+        await _setup_auth_with_admin(async_client)
+        result = await db_session.execute(select(User).where(User.username == "energyadmin"))
+        admin = result.scalar_one()
+        full_key = await _make_api_key(db_session, owner_id=admin.id, can_update_energy_cost=True)
+
+        admin.is_active = False
+        await db_session.commit()
+
+        resp = await async_client.post(
+            "/api/v1/settings/electricity-price",
+            headers={"X-API-Key": full_key},
+            json={"energy_cost_per_kwh": 0.42},
+        )
+        assert resp.status_code == 403
+        assert "owner" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_admin_user_with_settings_update_allowed(self, async_client: AsyncClient, db_session: AsyncSession):
         """JWT user with SETTINGS_UPDATE permission can still hit this route."""
         token = await _setup_auth_with_admin(async_client)
