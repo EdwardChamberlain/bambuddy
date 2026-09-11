@@ -8,6 +8,7 @@ import threading
 import time
 import weakref
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from ftplib import FTP, FTP_TLS  # nosec B402
 from io import BytesIO
@@ -18,11 +19,19 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# FTP operations are blocking and can last for minutes during a large upload.
+# Keep concurrent queue dispatches out of asyncio's shared default executor so
+# they cannot starve unrelated application work. The scheduler's setting caps
+# queue uploads at 16; headroom also covers browsing, downloads, and deletes.
+_FTP_MAX_WORKERS = 48
+_ftp_executor = ThreadPoolExecutor(max_workers=_FTP_MAX_WORKERS, thread_name_prefix="bambu-ftp")
+
 # A flat wall-clock cap punishes large files on slow but healthy links. Use a
 # deliberately pessimistic throughput floor as a backstop instead; a dead link
 # is detected sooner by the blocking socket timeout.
 _UPLOAD_FLOOR_BYTES_PER_SEC = 25 * 1024
 _UPLOAD_MIN_TIMEOUT = 600.0
+_FTP_CANCEL_GRACE = 60.0
 _UPLOAD_CANCEL_GRACE = 60.0
 
 
@@ -956,7 +965,7 @@ async def download_file_async(
         done = threading.Event()
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, _download, force_prot_c, completion, done), timeout=timeout
+                loop.run_in_executor(_ftp_executor, _download, force_prot_c, completion, done), timeout=timeout
             )
         except TimeoutError:
             # Slow WiFi links commonly overshoot ftp_timeout by 10–30 s without
@@ -1051,7 +1060,7 @@ async def download_file_try_paths_async(
             client.disconnect()
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _download), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP download_try_paths exceeded its %ss cap for %s", timeout, ip_address)
         return False
@@ -1066,20 +1075,59 @@ def _upload_deadline(local_path: Path) -> float:
     return max(_UPLOAD_MIN_TIMEOUT, size / _UPLOAD_FLOOR_BYTES_PER_SEC)
 
 
-# One STOR at a time per printer. Concurrent transfers can corrupt the same
-# remote path and make an otherwise healthy printer appear unreliable.
-_upload_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+# One mutating FTP operation at a time per printer. Concurrent transfers or
+# deletes can corrupt the same remote path and make an otherwise healthy
+# printer appear unreliable.
+_printer_ftp_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
     weakref.WeakKeyDictionary()
 )
 
 
-def _upload_lock(loop: asyncio.AbstractEventLoop, ip_address: str) -> asyncio.Lock:
-    per_loop = _upload_locks.setdefault(loop, {})
+def _printer_ftp_lock(loop: asyncio.AbstractEventLoop, ip_address: str) -> asyncio.Lock:
+    per_loop = _printer_ftp_locks.setdefault(loop, {})
     lock = per_loop.get(ip_address)
     if lock is None:
         lock = asyncio.Lock()
         per_loop[ip_address] = lock
     return lock
+
+
+async def _drain_ftp_worker(fut: asyncio.Future, operation: str, grace: float) -> None:
+    """Wait for a blocking FTP worker before releasing printer ownership.
+
+    Cancelling an asyncio wrapper cannot stop a thread already running in the
+    executor. Keep a separate drain task so repeated cancellation of the
+    scheduler task cannot release the per-printer lock while that thread is
+    still mutating the printer.
+    """
+
+    async def _consume() -> None:
+        try:
+            await asyncio.shield(fut)
+        except Exception as exc:
+            # Retrieve the executor exception so it is not reported as
+            # unhandled after the caller has already been cancelled/timed out.
+            logger.debug("FTP %s worker finished during cancellation: %s", operation, exc)
+
+    drain_task = asyncio.create_task(_consume(), name=f"ftp-drain-{operation}")
+    try:
+        await asyncio.wait_for(asyncio.shield(drain_task), timeout=grace)
+        return
+    except asyncio.TimeoutError:
+        logger.error(
+            "FTP %s worker did not stop within %.0fs; retaining printer ownership until it finishes",
+            operation,
+            grace,
+        )
+    except asyncio.CancelledError:
+        # A second shutdown cancellation must not release the lock early.
+        logger.warning("FTP %s worker drain was cancelled; waiting for it to finish", operation)
+
+    while not drain_task.done():
+        try:
+            await asyncio.shield(drain_task)
+        except asyncio.CancelledError:
+            continue
 
 
 async def upload_file_async(
@@ -1149,9 +1197,18 @@ async def upload_file_async(
 
     async def _attempt(force_prot_c: bool) -> bool:
         """Run one worker attempt and cooperatively stop it on timeout."""
-        fut = loop.run_in_executor(None, lambda: _upload(force_prot_c))
+        fut = loop.run_in_executor(_ftp_executor, lambda: _upload(force_prot_c))
         try:
             return await asyncio.wait_for(asyncio.shield(fut), timeout=deadline)
+        except asyncio.CancelledError:
+            # A scheduler shutdown or queue cancellation cancels the asyncio
+            # wrapper, but shield deliberately leaves the executor future
+            # running. Signal the blocking worker and wait for its client to
+            # disconnect before the logical queue slot is released.
+            cancel.set()
+            logger.info("FTP upload of %s was cancelled; stopping the transfer", remote_path)
+            await _drain_ftp_worker(fut, f"upload of {remote_path}", _UPLOAD_CANCEL_GRACE)
+            raise
         except TimeoutError:
             cancel.set()
             logger.warning(
@@ -1159,25 +1216,13 @@ async def upload_file_async(
                 remote_path,
                 deadline,
             )
-            try:
-                await asyncio.wait_for(asyncio.shield(fut), timeout=_UPLOAD_CANCEL_GRACE)
-            except UploadCancelled:
-                logger.info("FTP upload of %s cancelled; partial file removed from the printer", remote_path)
-            except TimeoutError:
-                logger.error(
-                    "FTP upload thread for %s did not stop within %.0fs of the cancel signal",
-                    remote_path,
-                    _UPLOAD_CANCEL_GRACE,
-                )
-                fut.add_done_callback(_swallow_future_result)
-            except Exception as e:
-                logger.warning("FTP upload of %s errored while cancelling: %s", remote_path, e)
+            await _drain_ftp_worker(fut, f"upload of {remote_path}", _UPLOAD_CANCEL_GRACE)
             raise UploadCancelled(
                 f"Upload of {remote_path} to {ip_address} exceeded its {deadline:.0f}s deadline "
                 f"(link sustained less than {_UPLOAD_FLOOR_BYTES_PER_SEC // 1024} KB/s)"
             ) from None
 
-    async with _upload_lock(loop, ip_address):
+    async with _printer_ftp_lock(loop, ip_address):
         # Check if we have a cached mode for this printer
         cached_mode = BambuFTPClient._mode_cache.get(ip_address)
 
@@ -1196,12 +1241,6 @@ async def upload_file_async(
             return await _attempt(True)
 
         return False
-
-
-def _swallow_future_result(fut: asyncio.Future) -> None:
-    """Retrieve a late worker exception so asyncio does not log it as unhandled."""
-    if not fut.cancelled():
-        fut.exception()
 
 
 async def list_files_async(
@@ -1237,7 +1276,7 @@ async def list_files_async(
         return []
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _list), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _list), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP list_files timed out after %ss for %s", timeout, path)
         return []
@@ -1280,11 +1319,18 @@ async def delete_file_async(
                 client.disconnect()
         return DeleteResult.FAILED
 
-    try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _delete), timeout=timeout)
-    except TimeoutError:
-        logger.warning("FTP delete_file exceeded its %ss cap for %s", timeout, ip_address)
-        return DeleteResult.FAILED
+    async with _printer_ftp_lock(loop, ip_address):
+        fut = loop.run_in_executor(_ftp_executor, _delete)
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+        except asyncio.CancelledError:
+            logger.info("FTP delete of %s was cancelled; waiting for the printer operation to stop", remote_path)
+            await _drain_ftp_worker(fut, f"delete of {remote_path}", _FTP_CANCEL_GRACE)
+            raise
+        except TimeoutError:
+            logger.warning("FTP delete_file exceeded its %ss cap for %s", timeout, ip_address)
+            await _drain_ftp_worker(fut, f"delete of {remote_path}", _FTP_CANCEL_GRACE)
+            return DeleteResult.FAILED
 
 
 async def download_file_bytes_async(
@@ -1321,7 +1367,7 @@ async def download_file_bytes_async(
         return None
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _download), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP download_bytes exceeded its %ss cap for %s", timeout, ip_address)
         return None
@@ -1360,7 +1406,7 @@ async def get_storage_info_async(
         return None
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _get_storage), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _get_storage), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP get_storage_info exceeded its %ss cap for %s", timeout, ip_address)
         return None

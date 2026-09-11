@@ -736,7 +736,7 @@ async def bulk_update_queue_items(
 
     for item in items:
         item = await lock_queue_item(db, item.id)
-        if not item or item.status != "pending":
+        if not item or item.status != "pending" or item.dispatching_at is not None:
             skipped_count += 1
             continue
 
@@ -798,6 +798,8 @@ async def create_batch(
         items = result.scalars().all()
         for item in items:
             if item.status != "pending":
+                continue
+            if item.dispatching_at is not None:
                 continue
             if item.batch_id is not None:
                 continue
@@ -934,12 +936,20 @@ async def cancel_batch(
     )
     pending_items = result.scalars().all()
     cancelled_count = 0
+    cancelled_ids: list[int] = []
     for item in pending_items:
         item.status = "cancelled"
         cancelled_count += 1
+        cancelled_ids.append(item.id)
 
     batch.status = "cancelled"
     await db.commit()
+
+    if cancelled_ids:
+        from backend.app.services.print_scheduler import scheduler
+
+        for item_id in cancelled_ids:
+            scheduler.cancel_inflight(item_id)
 
     return {"message": f"Batch cancelled, {cancelled_count} pending items cancelled"}
 
@@ -1042,6 +1052,9 @@ async def update_queue_item(
 
     if item.status not in ("pending", "preheating"):
         raise HTTPException(400, "Can only update pending items")
+
+    if item.status == "pending" and item.dispatching_at is not None:
+        raise HTTPException(409, "Item is being dispatched — cancel it first to make changes")
 
     update_data = data.model_dump(exclude_unset=True)
 
@@ -1155,6 +1168,15 @@ async def update_queue_item(
             json.dumps(update_data["nozzle_mapping"]) if update_data["nozzle_mapping"] else None
         )
 
+    # Validation above contains awaits, so a scheduler worker may have claimed
+    # this row after the initial guard. Re-check immediately before mutating it.
+    if item.status == "pending":
+        claimed = (
+            await db.execute(select(PrintQueueItem.dispatching_at).where(PrintQueueItem.id == item_id))
+        ).scalar_one_or_none()
+        if claimed is not None:
+            raise HTTPException(409, "Item is being dispatched — cancel it first to make changes")
+
     if item.status == "preheating":
         await abort_heat_soak(db, item, "Heat soak stopped for editing", status="pending")
         item = await lock_queue_item(db, item_id)
@@ -1201,6 +1223,10 @@ async def delete_queue_item(
         item = await lock_queue_item(db, item_id)
     await db.delete(item)
     await db.commit()
+
+    from backend.app.services.print_scheduler import scheduler
+
+    scheduler.cancel_inflight(item_id)
 
     logger.info("Deleted queue item %s", item_id)
     return {"message": "Queue item deleted"}
@@ -1315,6 +1341,10 @@ async def cancel_queue_item(
     item.status = "cancelled"
     item.completed_at = datetime.now(timezone.utc)
     await db.commit()
+
+    from backend.app.services.print_scheduler import scheduler
+
+    scheduler.cancel_inflight(item_id)
 
     logger.info("Cancelled queue item %s", item_id)
     return {"message": "Queue item cancelled"}

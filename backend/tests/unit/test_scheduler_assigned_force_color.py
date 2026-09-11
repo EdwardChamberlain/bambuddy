@@ -147,6 +147,7 @@ async def test_model_unforced_job_recomputes_cross_material_mapping(mock_pm, sch
     items_result, busy_result = _queue_results(item)
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[items_result, busy_result])
+    db.get = AsyncMock(return_value=item)
     printer = SimpleNamespace(id=3, name="P1S")
 
     with (
@@ -162,6 +163,8 @@ async def test_model_unforced_job_recomputes_cross_material_mapping(mock_pm, sch
         ) as mapping_is_safe,
         patch.object(scheduler, "_compute_ams_mapping_for_printer", new=AsyncMock(return_value=[0])) as compute,
         patch.object(scheduler, "_block_on_filament_deficit", new=AsyncMock(return_value=False)),
+        patch.object(scheduler, "_claim_for_dispatch", new=AsyncMock(return_value=True)),
+        patch.object(scheduler, "_clear_dispatch_claim", new=AsyncMock()),
         patch.object(scheduler, "_start_print", new=AsyncMock()) as start_print,
         patch.object(scheduler, "_check_auto_drying", new=AsyncMock()),
         patch(
@@ -199,6 +202,7 @@ async def test_forced_job_waits_when_material_metadata_is_missing(mock_pm, sched
     items_result, busy_result = _queue_results(item)
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[items_result, busy_result])
+    db.get = AsyncMock(return_value=item)
     mock_pm.is_connected.return_value = True
 
     with (
@@ -300,6 +304,7 @@ async def test_assigned_job_recomputes_mapping_and_starts_on_exact_colour(mock_p
     items_result, busy_result = _queue_results(item)
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[items_result, busy_result])
+    db.get = AsyncMock(return_value=item)
     mock_pm.is_connected.return_value = True
 
     with (
@@ -310,6 +315,8 @@ async def test_assigned_job_recomputes_mapping_and_starts_on_exact_colour(mock_p
         patch.object(scheduler, "_get_missing_force_color_slots", return_value=[]),
         patch.object(scheduler, "_compute_ams_mapping_for_printer", new=AsyncMock(return_value=[2])),
         patch.object(scheduler, "_block_on_filament_deficit", new=AsyncMock(return_value=False)),
+        patch.object(scheduler, "_claim_for_dispatch", new=AsyncMock(return_value=True)),
+        patch.object(scheduler, "_clear_dispatch_claim", new=AsyncMock()),
         patch.object(scheduler, "_start_print", new=AsyncMock()) as start_print,
         patch.object(scheduler, "_check_auto_drying", new=AsyncMock()),
     ):
@@ -329,6 +336,7 @@ async def test_assigned_job_allows_different_colour_when_force_is_disabled(mock_
     items_result, busy_result = _queue_results(item)
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[items_result, busy_result])
+    db.get = AsyncMock(return_value=item)
     mock_pm.is_connected.return_value = True
 
     with (
@@ -339,6 +347,8 @@ async def test_assigned_job_allows_different_colour_when_force_is_disabled(mock_
         patch.object(scheduler, "_ams_mapping_uses_compatible_materials", return_value=True),
         patch.object(scheduler, "_get_missing_force_color_slots") as missing_colors,
         patch.object(scheduler, "_block_on_filament_deficit", new=AsyncMock(return_value=False)),
+        patch.object(scheduler, "_claim_for_dispatch", new=AsyncMock(return_value=True)),
+        patch.object(scheduler, "_clear_dispatch_claim", new=AsyncMock()),
         patch.object(scheduler, "_start_print", new=AsyncMock()) as start_print,
         patch.object(scheduler, "_check_auto_drying", new=AsyncMock()),
     ):

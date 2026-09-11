@@ -120,6 +120,7 @@ const AUTOSAVE_SETTING_KEYS = [
   'default_timelapse',
   'default_nozzle_offset_cali',
   'require_plate_clear',
+  'queue_max_concurrent_uploads',
   'nozzle_temp_presets',
   'bed_temp_presets',
   'chamber_temp_presets',
@@ -175,6 +176,8 @@ function comparableAutosaveValue(settings: AppSettings, key: AutosaveSettingKey)
       return settings[key] ?? true;
     case 'session_max_hours':
       return settings[key] ?? 24;
+    case 'queue_max_concurrent_uploads':
+      return Number(settings[key] ?? 1);
     default:
       return settings[key];
   }
@@ -205,6 +208,7 @@ registerSettingsSearch({ labelKey: 'settings.messageTemplates', tab: 'notificati
 registerSettingsSearch({ labelKey: 'settings.defaultPrintOptions', labelFallback: 'Default Print Options', tab: 'queue', keywords: 'print bed leveling flow calibration vibration first layer timelapse', anchor: 'card-print-options' });
 registerSettingsSearch({ labelKey: 'settings.tempFanPresetsTitle', labelFallback: 'Temperature & Fan Presets', tab: 'queue', keywords: 'temperature fan presets nozzle bed chamber quick buttons popover', anchor: 'card-temp-fan-presets' });
 registerSettingsSearch({ labelKey: 'settings.plateClear', labelFallback: 'Plate-Clear Confirmation', tab: 'queue', keywords: 'plate clear confirm auto queue', anchor: 'card-plate' });
+registerSettingsSearch({ labelKey: 'settings.concurrentUploadsTitle', labelFallback: 'Concurrent Uploads', tab: 'queue', keywords: 'concurrent parallel upload transfer ftp queue fleet', anchor: 'card-concurrent-uploads' });
 registerSettingsSearch({ labelKey: 'settings.gcodeInjection', labelFallback: 'G-code Injection', tab: 'queue', keywords: 'gcode injection start end autoprint farmloop swapmod autoclear printflow', anchor: 'card-gcode' });
 registerSettingsSearch({ labelKey: 'settings.slicerCard', labelFallback: 'Slicer', tab: 'queue', keywords: 'slicer orcaslicer bambustudio orca bambu api sidecar url docker preferred', anchor: 'card-slicer' });
 registerSettingsSearch({ labelKey: 'settings.queueDrying', tab: 'queue', keywords: 'drying presets temperature time humidity ams', anchor: 'card-drying' });
@@ -4245,6 +4249,37 @@ export function SettingsPage() {
                   />
                   <div className="w-11 h-6 bg-bambu-dark-tertiary peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-bambu-green"></div>
                 </label>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Fleet dispatch concurrency (#63) */}
+          <Card id="card-concurrent-uploads">
+            <CardHeader>
+              <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                <ListOrdered className="w-4 h-4 text-bambu-green" />
+                {t('settings.concurrentUploadsTitle', 'Concurrent printer uploads')}
+              </h3>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-bambu-gray">
+                {t('settings.concurrentUploadsDescription', 'Choose how many independent printers may receive files at the same time. A value of 1 preserves the legacy serialized behavior; higher values speed up fleet dispatches but use more host connections and bandwidth.')}
+              </p>
+              <div className="w-full sm:w-1/2">
+                <label className="block text-xs text-bambu-gray mb-1">
+                  {t('settings.concurrentUploadsLabel', 'Printer sessions in flight')}
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={localSettings.queue_max_concurrent_uploads ?? 1}
+                  onChange={(e) => updateSetting('queue_max_concurrent_uploads', Math.max(1, Math.min(16, parseInt(e.target.value, 10) || 1)))}
+                  className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm focus:outline-none focus:border-bambu-green"
+                />
+                <p className="text-xs text-bambu-gray mt-1">
+                  {t('settings.concurrentUploadsHelp', 'The default is 1. Each item shows when it is waiting for a pool slot or its printer reservation.')}
+                </p>
               </div>
             </CardContent>
           </Card>

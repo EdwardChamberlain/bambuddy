@@ -111,6 +111,12 @@ class PrintQueueItem(Base):
     # Status: pending, preheating, dispatching, printing, completed, failed, skipped, cancelled
     status: Mapped[str] = mapped_column(String(20), default="pending")
 
+    # Durable dispatch claim. A queue worker stamps this before slow source
+    # preparation or FTP I/O so pending rows cannot be reassigned or selected
+    # by another worker. The claim is cleared when the worker exits; startup
+    # reconciliation clears claims left by a process restart.
+    dispatching_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     # Cleared by the per-printer "Resume after failure" action (#1818) so the
     # scheduler's `_check_previous_success` lookback skips this row. Without
     # this, a single `failed` or `aborted` print poisoned every later

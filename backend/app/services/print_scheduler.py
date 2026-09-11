@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -55,9 +55,14 @@ logger = logging.getLogger(__name__)
 # state value did change. SLICING is included because some firmwares park
 # briefly in SLICING between PREPARE and RUNNING while parsing the g-code.
 _ACTIVE_PRINT_STATES: frozenset[str] = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+# Conservative rollout default: existing installations retain one printer
+# session at a time until an operator explicitly raises the limit.
+DEFAULT_QUEUE_MAX_CONCURRENT_UPLOADS = 1
+MAX_QUEUE_CONCURRENT_UPLOADS = 16
 _WAITING_FOR_DRYING_MESSAGE = "Waiting for AMS drying to complete"
 _STOPPING_DRYING_MESSAGE = "Stopping AMS drying before dispatch"
 _DRYING_STOP_FAILED_MESSAGE = "Unable to stop AMS drying; waiting to retry"
+_UPLOAD_POOL_WAITING_PREFIX = "Waiting for upload slot"
 _DRYING_WAITING_MESSAGES: frozenset[str] = frozenset(
     {
         _WAITING_FOR_DRYING_MESSAGE,
@@ -223,6 +228,7 @@ class PrintScheduler:
         self._running = False
         self._heat_soak = ChamberHeatSoak()
         self._check_interval = 30  # seconds
+        self._fast_check_interval = 3  # seconds while dispatch work is draining
         self._power_on_wait_time = 180  # seconds to wait for printer after power on (3 min)
         self._power_on_check_interval = 10  # seconds between connection checks
         # Track which printers are currently auto-drying (printer_id -> start timestamp)
@@ -230,24 +236,60 @@ class PrintScheduler:
         # Recovery completion is deliberately asynchronous, so do not start a
         # second completion chain if a slow side effect overlaps the next tick.
         self._terminal_dispatch_recoveries: set[int] = set()
+        # Queue rows remain pending while their per-item worker uploads and
+        # prepares the durable dispatch reservation. Keep them out of later
+        # selection passes and release the slot on every task outcome.
+        self._inflight: dict[int, tuple[asyncio.Task, int | None]] = {}
 
     async def run(self):
         """Main loop - check queue every interval."""
         self._running = True
         logger.info("Print scheduler started")
 
+        await self._clear_stale_dispatch_claims()
+
         while self._running:
+            dispatched = False
             try:
-                await self.check_queue()
+                dispatched = await self.check_queue()
             except Exception as e:
                 logger.error("Scheduler error: %s", e)
 
-            await asyncio.sleep(self._check_interval)
+            await asyncio.sleep(self._fast_check_interval if dispatched else self._check_interval)
 
     def stop(self):
         """Stop the scheduler."""
         self._running = False
+        # App shutdown also cancels the global task registry. Cancelling here
+        # prevents a same-process restart from retaining upload reservations.
+        for task, _printer_id in tuple(self._inflight.values()):
+            if not task.done():
+                task.cancel()
         logger.info("Print scheduler stopped")
+
+    def cancel_inflight(self, item_id: int) -> bool:
+        """Cancel a worker after its queue row has been cancelled or deleted."""
+        entry = self._inflight.get(item_id)
+        if not entry:
+            return False
+        task, _printer_id = entry
+        if task.done():
+            return False
+        task.cancel()
+        return True
+
+    async def _clear_stale_dispatch_claims(self) -> None:
+        """Release claims left by a process that stopped during dispatch."""
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    update(PrintQueueItem).where(PrintQueueItem.dispatching_at.is_not(None)).values(dispatching_at=None)
+                )
+                await db.commit()
+                if result.rowcount:
+                    logger.info("Cleared %d stale queue dispatch claim(s)", result.rowcount)
+        except Exception:
+            logger.exception("Failed to clear stale queue dispatch claims")
 
     async def _recover_stale_dispatches(self, db: AsyncSession) -> None:
         """Reconcile durable dispatches left behind by a restart.
@@ -378,8 +420,8 @@ class PrintScheduler:
             spawn_background_task(self._dispatch_after_heat_soak(item_id), name=f"heat-soak-dispatch-{item_id}")
         return set((await db.scalars(select(Printer.id).where(Printer.heat_soak_shutdown_pending.is_(True)))).all())
 
-    async def check_queue(self):
-        """Check for prints ready to start."""
+    async def check_queue(self) -> bool:
+        """Check for prints ready to start and report whether to tick quickly."""
         async with async_session() as db:
             shutdown_printers = await self._check_heat_soaks(db)
             await self._recover_stale_dispatches(db)
@@ -395,6 +437,7 @@ class PrintScheduler:
                 result = await db.execute(
                     select(PrintQueueItem)
                     .where(PrintQueueItem.status == "pending")
+                    .where(PrintQueueItem.dispatching_at.is_(None))
                     .order_by(
                         PrintQueueItem.printer_id,
                         PrintQueueItem.target_model,
@@ -407,9 +450,17 @@ class PrintScheduler:
                 result = await db.execute(
                     select(PrintQueueItem)
                     .where(PrintQueueItem.status == "pending")
+                    .where(PrintQueueItem.dispatching_at.is_(None))
                     .order_by(PrintQueueItem.printer_id, PrintQueueItem.position)
                 )
             items = list(result.scalars().all())
+            original_printer_ids = {item.id: item.printer_id for item in items}
+
+            # Upload workers leave rows pending until they establish the
+            # durable dispatch reservation. Exclude those rows so a fast tick
+            # cannot send the same file twice.
+            if self._inflight:
+                items = [item for item in items if item.id not in self._inflight]
 
             # Read plate-clear setting once per queue check
             require_plate_clear = await self._get_bool_setting(db, "require_plate_clear", default=True)
@@ -423,16 +474,35 @@ class PrintScheduler:
 
             busy_printers.update(shutdown_printers)
 
+            # The durable status does not change until the upload completes;
+            # reserve each worker's printer in memory for the same interval.
+            busy_printers.update(pid for _task, pid in self._inflight.values() if pid is not None)
+
             if not items:
-                # No pending items — still check auto-drying on idle printers
+                # No dispatchable items — still check auto-drying, but do not
+                # dry a printer whose upload is about to start printing.
                 await self._check_auto_drying(db, [], busy_printers, require_plate_clear=require_plate_clear)
-                return
+                return bool(self._inflight)
 
             logger.info(
                 "Queue check: found %d pending items: %s",
                 len(items),
                 [(i.id, i.printer_id, i.archive_id, i.library_file_id) for i in items],
             )
+
+            upload_limit = max(
+                1,
+                min(
+                    MAX_QUEUE_CONCURRENT_UPLOADS,
+                    await self._get_int_setting(
+                        db,
+                        "queue_max_concurrent_uploads",
+                        default=DEFAULT_QUEUE_MAX_CONCURRENT_UPLOADS,
+                    ),
+                ),
+            )
+            available_slots = max(0, upload_limit - len(self._inflight))
+            pool_waiting_reason = f"{_UPLOAD_POOL_WAITING_PREFIX} ({len(self._inflight)} of {upload_limit} in use)"
 
             # Seed busy_printers with printers that already have an active or
             # unconfirmed-dispatch item. _is_printer_idle() alone is not sufficient
@@ -446,6 +516,33 @@ class PrintScheduler:
 
             # Log skip reasons once per queue check (not per item)
             skip_reasons: dict[str, int] = {}
+
+            # Selection is synchronous; the actual upload/session work is
+            # launched after all queue decisions have been committed.
+            dispatch_ids: list[int] = []
+            waiting_reason_changed = False
+
+            # A direct printer-card upload consumes its transient library row.
+            # Do not let two concurrent workers archive/delete the same row.
+            # Ordinary library prints only read the row and may still fan out.
+            dispatch_libs: set[int] = set()
+            consumed_libs: set[int] = set()
+
+            def _library_row_conflict(candidate: PrintQueueItem) -> bool:
+                library_id = candidate.library_file_id
+                if library_id is None:
+                    return False
+                if candidate.cleanup_library_after_dispatch:
+                    return library_id in dispatch_libs
+                return library_id in consumed_libs
+
+            def _claim_library_row(candidate: PrintQueueItem) -> None:
+                library_id = candidate.library_file_id
+                if library_id is None:
+                    return
+                dispatch_libs.add(library_id)
+                if candidate.cleanup_library_after_dispatch:
+                    consumed_libs.add(library_id)
 
             for item in items:
                 # Check scheduled time first (scheduled_time is stored in UTC from ISO string)
@@ -476,6 +573,8 @@ class PrintScheduler:
                 if item.printer_id:
                     # Specific printer assignment (existing behavior)
                     if item.printer_id in busy_printers:
+                        item.waiting_reason = f"Waiting for printer reservation on printer {item.printer_id}"
+                        await db.commit()
                         continue
 
                     # Check if printer is idle
@@ -516,7 +615,9 @@ class PrintScheduler:
 
                     # Check if printer is idle (busy with another print)
                     if not printer_idle:
+                        item.waiting_reason = f"Waiting for printer reservation on printer {item.printer_id}"
                         busy_printers.add(item.printer_id)
+                        await db.commit()
                         continue
 
                     # Check condition (previous print success)
@@ -615,8 +716,29 @@ class PrintScheduler:
                         busy_printers.add(item.printer_id)
                         continue
 
-                    # Start the print
-                    await self._start_print(db, item)
+                    if len(dispatch_ids) >= available_slots:
+                        if item.waiting_reason != pool_waiting_reason:
+                            item.waiting_reason = pool_waiting_reason
+                            waiting_reason_changed = True
+                        skip_reasons["upload_pool_full"] = skip_reasons.get("upload_pool_full", 0) + 1
+                        continue
+
+                    # Cleanup uploads consume their source library row. Hold a
+                    # conflicting item for the next pass rather than racing a
+                    # delete/unlink against another worker's upload.
+                    if _library_row_conflict(item):
+                        skip_reasons["library_row_in_use"] = skip_reasons.get("library_row_in_use", 0) + 1
+                        busy_printers.add(item.printer_id)
+                        continue
+
+                    _claim_library_row(item)
+                    if item.waiting_reason and (
+                        item.waiting_reason.startswith("Waiting for printer reservation")
+                        or item.waiting_reason.startswith(_UPLOAD_POOL_WAITING_PREFIX)
+                    ):
+                        item.waiting_reason = None
+                        waiting_reason_changed = True
+                    dispatch_ids.append(item.id)
                     busy_printers.add(item.printer_id)
 
                     # SJF starvation guard: mark items that were jumped
@@ -690,6 +812,13 @@ class PrintScheduler:
                             )
 
                     if printer_id:
+                        if len(dispatch_ids) >= available_slots:
+                            if item.waiting_reason != pool_waiting_reason:
+                                item.waiting_reason = pool_waiting_reason
+                                waiting_reason_changed = True
+                            skip_reasons["upload_pool_full"] = skip_reasons.get("upload_pool_full", 0) + 1
+                            continue
+
                         # Check condition (previous print success) before assigning
                         if item.require_previous_success:
                             if not await self._check_previous_success(db, item):
@@ -769,7 +898,12 @@ class PrintScheduler:
                             busy_printers.add(printer_id)
                             continue
 
-                        await self._start_print(db, item)
+                        if _library_row_conflict(item):
+                            skip_reasons["library_row_in_use"] = skip_reasons.get("library_row_in_use", 0) + 1
+                            continue
+
+                        _claim_library_row(item)
+                        dispatch_ids.append(item.id)
                         busy_printers.add(printer_id)
 
                         # SJF starvation guard: mark model-based items that were jumped
@@ -809,8 +943,142 @@ class PrintScheduler:
                         awaiting,
                     )
 
+            # Persist model-to-printer assignments and waiting explanations
+            # before workers open their own sessions. This also releases the
+            # scheduler's connection during slow FTP transfers.
+            assignment_changed = any(item.printer_id != original_printer_ids.get(item.id) for item in items)
+            if dispatch_ids or assignment_changed or waiting_reason_changed:
+                await db.commit()
+
+            if dispatch_ids:
+                item_printers = {item.id: item.printer_id for item in items}
+                self._launch_uploads(dispatch_ids, item_printers, upload_limit)
+                # Give newly-created workers one turn to acquire their own
+                # sessions and reach the first I/O await. The scheduler still
+                # returns without waiting for uploads to finish.
+                await asyncio.sleep(0)
+
             # Auto-drying: start drying on idle printers that have no pending queue items
             await self._check_auto_drying(db, items, busy_printers, require_plate_clear=require_plate_clear)
+
+            # Keep checking quickly while workers are active or work was selected
+            # but deferred by a full pool.
+            return bool(dispatch_ids) or bool(self._inflight)
+
+    def _launch_uploads(
+        self,
+        item_ids: list[int],
+        item_printers: dict[int, int | None],
+        limit: int,
+    ) -> None:
+        """Launch independent queue workers into the bounded upload pool.
+
+        Each worker owns its database session. The pool is refillable across
+        scheduler ticks, so a slow printer cannot hold an unused slot hostage
+        while other printers wait, and a worker failure cannot cancel siblings.
+        """
+        occupied_printers = {printer_id for _task, printer_id in self._inflight.values() if printer_id is not None}
+        candidates: list[int] = []
+        reserved_printers = set(occupied_printers)
+        for item_id in item_ids:
+            if item_id in self._inflight:
+                continue
+            printer_id = item_printers.get(item_id)
+            if printer_id is not None and printer_id in reserved_printers:
+                logger.info(
+                    "Queue item %s waiting for printer reservation %s; another dispatch is active",
+                    item_id,
+                    printer_id,
+                )
+                continue
+            if printer_id is not None:
+                reserved_printers.add(printer_id)
+            candidates.append(item_id)
+
+        free = max(0, limit - len(self._inflight))
+        if free <= 0:
+            logger.info(
+                "Upload pool full (%d/%d in flight); deferring %d queue item(s)",
+                len(self._inflight),
+                limit,
+                len(candidates),
+            )
+            return
+
+        for item_id in candidates[:free]:
+
+            async def _run_dispatch(
+                selected_item_id: int = item_id,
+                selected_printer_id: int | None = item_printers.get(item_id),
+            ) -> None:
+                await self._dispatch_one(selected_item_id, selected_printer_id)
+
+            task = spawn_background_task(
+                _run_dispatch(),
+                name=f"queue-upload-{item_id}",
+            )
+            self._inflight[item_id] = (task, item_printers.get(item_id))
+            task.add_done_callback(lambda _task, queue_item_id=item_id: self._inflight.pop(queue_item_id, None))
+
+        if len(candidates) > free:
+            logger.info(
+                "Upload pool launched %d/%d queue item(s); %d remain pending for the next tick",
+                free,
+                len(candidates),
+                len(candidates) - free,
+            )
+
+    async def _dispatch_one(self, item_id: int, selected_printer_id: int | None = None) -> None:
+        """Run one upload/dispatch with an isolated session."""
+        async with async_session() as item_db:
+            if not await self._claim_for_dispatch(item_db, item_id, selected_printer_id):
+                logger.info(
+                    "Queue item %s is no longer claimable for dispatch; skipping",
+                    item_id,
+                )
+                return
+            try:
+                item = await item_db.get(PrintQueueItem, item_id)
+                if not item:
+                    logger.info("Queue item %s vanished after dispatch claim", item_id)
+                    return
+                current_task = asyncio.current_task()
+                if current_task is not None and item_id in self._inflight:
+                    # The queue row may have been edited in the tiny window
+                    # between selection and the durable claim. Keep the
+                    # in-memory printer reservation aligned with the row the
+                    # worker actually loaded.
+                    self._inflight[item_id] = (current_task, item.printer_id)
+                await self._start_print(item_db, item)
+            finally:
+                await self._clear_dispatch_claim(item_db, item_id)
+
+    async def _claim_for_dispatch(
+        self,
+        db: AsyncSession,
+        item_id: int,
+        selected_printer_id: int | None = None,
+    ) -> bool:
+        """Atomically claim a pending row without accepting reassignment races."""
+        claim = (
+            update(PrintQueueItem)
+            .where(PrintQueueItem.id == item_id)
+            .where(PrintQueueItem.status == "pending")
+            .where(PrintQueueItem.dispatching_at.is_(None))
+        )
+        if selected_printer_id is not None:
+            claim = claim.where(PrintQueueItem.printer_id == selected_printer_id)
+        result = await db.execute(claim.values(dispatching_at=datetime.now(timezone.utc)))
+        await db.commit()
+        return result.rowcount > 0
+
+    async def _clear_dispatch_claim(self, db: AsyncSession, item_id: int) -> None:
+        """Release a worker claim without changing the queue lifecycle state."""
+        try:
+            await db.execute(update(PrintQueueItem).where(PrintQueueItem.id == item_id).values(dispatching_at=None))
+            await db.commit()
+        except Exception:
+            logger.exception("Failed to clear dispatch claim for queue item %s", item_id)
 
     async def _find_idle_printer_for_model(
         self,
@@ -1977,6 +2245,21 @@ class PrintScheduler:
             return setting.value.lower() == "true"
         return default
 
+    async def _get_int_setting(self, db: AsyncSession, key: str, default: int) -> int:
+        """Read an integer setting, falling back safely for legacy rows."""
+        try:
+            value = await self._get_setting(db, key)
+        except StopAsyncIteration:
+            # A few lightweight scheduler tests provide a finite mocked query
+            # sequence from before this optional setting existed. A missing
+            # mocked row has the same semantics as an absent persisted row.
+            value = None
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            logger.warning("Invalid integer setting %s=%r; using %s", key, value, default)
+            return default
+
     async def _get_drying_presets(self, db: AsyncSession) -> dict[str, dict[str, int]]:
         """Get drying presets (user-configured or built-in defaults)."""
         result = await db.execute(select(Settings).where(Settings.key == "drying_presets"))
@@ -2988,25 +3271,82 @@ class PrintScheduler:
         # Keep the same bounded numeric submission id in the row and MQTT
         # command so a terminal event remains attributable after restart.
         dispatch_subtask_id = str(int(time.time() * 1000) % 2_147_483_647 or 1)
+        now_utc = datetime.now(timezone.utc)
+        claim_timestamp = item.dispatching_at
+        if heat_soak_complete or claim_timestamp is None:
+            # Heat-soak handoffs already reserve the row as ``dispatching``.
+            # The no-claim path preserves direct unit-test callers; normal
+            # scheduler workers always enter through _dispatch_one above.
+            item.status = "dispatching"
+            item.dispatched_at = now_utc
+            item.dispatch_subtask_id = dispatch_subtask_id
+            item.started_at = None
+            item.error_message = None
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                logger.info(
+                    "Queue item %s was not dispatched because printer %s was reserved concurrently",
+                    item.id,
+                    item.printer_id,
+                )
+                return
+        else:
+            try:
+                cas = await db.execute(
+                    update(PrintQueueItem)
+                    .where(PrintQueueItem.id == item.id)
+                    .where(PrintQueueItem.status == "pending")
+                    .where(PrintQueueItem.dispatching_at == claim_timestamp)
+                    .values(
+                        status="dispatching",
+                        dispatched_at=now_utc,
+                        dispatch_subtask_id=dispatch_subtask_id,
+                        started_at=None,
+                        error_message=None,
+                    )
+                )
+                await db.commit()
+            except IntegrityError:
+                # The partial unique index on active printer rows is the
+                # authoritative single-dispatch guard. Another scheduler worker
+                # won the reservation after this worker began its upload; leave
+                # this item pending and never send the command.
+                await db.rollback()
+                logger.info(
+                    "Queue item %s was not dispatched because printer %s was reserved concurrently",
+                    item.id,
+                    item.printer_id,
+                )
+                return
+
+            if cas.rowcount == 0:
+                # Cancellation or deletion won the race while the file was
+                # being uploaded. Never publish MQTT for a row that is no longer ours.
+                logger.info(
+                    "Queue item %s was cancelled or removed during dispatch; cleaning up uploaded file",
+                    item.id,
+                )
+                try:
+                    await delete_file_async(
+                        printer.ip_address,
+                        printer.access_code,
+                        remote_path,
+                        socket_timeout=ftp_timeout,
+                        printer_model=printer.model,
+                    )
+                except Exception as cleanup_err:
+                    logger.debug("Queue item %s: cancelled-dispatch cleanup failed: %s", item.id, cleanup_err)
+                return
+
+        # Keep the ORM object in sync with the durable CAS before the command
+        # boundary and confirmation scheduling below.
         item.status = "dispatching"
-        item.dispatched_at = datetime.now(timezone.utc)
+        item.dispatched_at = now_utc
         item.dispatch_subtask_id = dispatch_subtask_id
         item.started_at = None
         item.error_message = None
-        try:
-            await db.commit()
-        except IntegrityError:
-            # The partial unique index on active printer rows is the
-            # authoritative single-dispatch guard. Another scheduler worker
-            # won the reservation after this worker began its upload; leave
-            # this item pending and never send the command.
-            await db.rollback()
-            logger.info(
-                "Queue item %s was not dispatched because printer %s was reserved concurrently",
-                item.id,
-                item.printer_id,
-            )
-            return
 
         # Register only after the durable reservation succeeded. Otherwise a
         # losing concurrent worker leaves a two-hour expected-print entry that

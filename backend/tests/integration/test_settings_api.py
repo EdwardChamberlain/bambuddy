@@ -40,6 +40,7 @@ class TestSettingsAPI:
         # Verify some default values
         assert isinstance(result["auto_archive"], bool)
         assert isinstance(result["currency"], str)
+        assert result["queue_max_concurrent_uploads"] == 1
 
     # ========================================================================
     # Update settings
@@ -104,6 +105,18 @@ class TestSettingsAPI:
 
         assert response.status_code == 200
         assert response.json()["energy_cost_per_kwh"] == 0.20
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_update_queue_concurrency(self, async_client: AsyncClient):
+        """Verify fleet upload concurrency is persisted and bounded."""
+        response = await async_client.put("/api/v1/settings/", json={"queue_max_concurrent_uploads": 3})
+
+        assert response.status_code == 200
+        assert response.json()["queue_max_concurrent_uploads"] == 3
+
+        response = await async_client.put("/api/v1/settings/", json={"queue_max_concurrent_uploads": 17})
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     @pytest.mark.integration
