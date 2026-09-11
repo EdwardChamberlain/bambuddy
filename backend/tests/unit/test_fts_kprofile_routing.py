@@ -1,5 +1,9 @@
 """FTS inlet bindings resolve AMS slots to the nozzle they currently feed."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from backend.app.services.bambu_mqtt import BambuMQTTClient
 from backend.app.utils.fts_routing import FTS_INLET_EXTRUDER, extruder_for_inlet, slot_extruder
 
@@ -39,3 +43,86 @@ def test_fts_move_notifies_only_after_the_first_binding():
     push(1)
 
     assert seen == [(1, "B"), (1, "A")]
+
+
+def _fts_state():
+    state = MagicMock()
+    state.raw_data = {
+        "ams": [
+            {
+                "id": "1",
+                "tray": [{"id": "0", "tray_type": "PLA", "tray_info_idx": "GFA01", "cali_idx": 16}],
+            }
+        ]
+    }
+    return state
+
+
+def _session(*results):
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(side_effect=list(results))
+    return session
+
+
+@pytest.mark.asyncio
+async def test_fts_move_reapplies_internal_preset_without_a_k_profile():
+    """A nozzle-specific filament preset must not depend on a K row existing."""
+    from backend.app.main import on_fts_inlet_change
+
+    assignment = MagicMock(tray_id=0, spool_id=12)
+    assignment_result = MagicMock()
+    assignment_result.scalars.return_value.all.return_value = [assignment]
+    spool = MagicMock(id=12)
+    spool_result = MagicMock()
+    spool_result.scalar_one_or_none.return_value = spool
+
+    client = MagicMock()
+    printer_manager = MagicMock()
+    printer_manager.get_client.return_value = client
+    printer_manager.get_status.return_value = _fts_state()
+    reapply = AsyncMock()
+
+    with (
+        patch("backend.app.main.printer_manager", printer_manager),
+        patch("backend.app.main.async_session", return_value=_session(assignment_result, spool_result)),
+        patch("backend.app.services.inventory_mode.spoolman_owns_assignments", new=AsyncMock(return_value=False)),
+        patch("backend.app.api.routes.inventory.apply_spool_to_slot_via_mqtt", new=reapply),
+    ):
+        await on_fts_inlet_change(7, 1, "A")
+
+    reapply.assert_awaited_once()
+    assert reapply.await_args.kwargs["spool"] is spool
+    assert reapply.await_args.kwargs["printer_id"] == 7
+    assert reapply.await_args.kwargs["ams_id"] == 1
+    assert reapply.await_args.kwargs["tray_id"] == 0
+    assert reapply.await_args.kwargs["current_tray_info_idx"] == "GFA01"
+
+
+@pytest.mark.asyncio
+async def test_fts_move_reapplies_spoolman_slot_settings():
+    from backend.app.main import on_fts_inlet_change
+
+    assignment = MagicMock(tray_id=0, spoolman_spool_id=42)
+    assignment_result = MagicMock()
+    assignment_result.scalars.return_value.all.return_value = [assignment]
+    assign = AsyncMock()
+    printer_manager = MagicMock()
+    printer_manager.get_client.return_value = MagicMock()
+    printer_manager.get_status.return_value = _fts_state()
+
+    with (
+        patch("backend.app.main.printer_manager", printer_manager),
+        patch("backend.app.main.async_session", return_value=_session(assignment_result)),
+        patch("backend.app.services.inventory_mode.spoolman_owns_assignments", new=AsyncMock(return_value=True)),
+        patch("backend.app.api.routes.spoolman_inventory.assign_spoolman_slot", new=assign),
+    ):
+        await on_fts_inlet_change(7, 1, "B")
+
+    assign.assert_awaited_once()
+    request = assign.await_args.args[0]
+    assert request.spoolman_spool_id == 42
+    assert request.printer_id == 7
+    assert request.ams_id == 1
+    assert request.tray_id == 0

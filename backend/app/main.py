@@ -103,17 +103,13 @@ from backend.app.services.printer_manager import (
     printer_manager,
     printer_state_to_dict,
 )
-from backend.app.services.slot_kprofile import find_slot_kprofile_for_extruder
 from backend.app.services.slot_nozzle import (
-    nozzle_diameter_for_extruder,
-    nozzle_flow_for_extruder,
     resolve_slot_nozzle,
 )
 from backend.app.services.smart_plug_manager import smart_plug_manager
 from backend.app.services.spool_assignment_notifications import (
     notify_missing_spool_assignments_on_print_start,
 )
-from backend.app.services.spool_filament_preset import printer_safe_filament_id
 from backend.app.services.spoolman import close_spoolman_client, get_spoolman_client, init_spoolman_client
 from backend.app.services.spoolman_tracking import (
     cleanup_tracking as _cleanup_spoolman_tracking,
@@ -1454,37 +1450,28 @@ def _is_bambu_uuid(tray_uuid: str) -> bool:
 
 
 async def on_fts_inlet_change(printer_id: int, ams_id: int, inlet: str):
-    """Re-point a moved AMS's K-profiles at the nozzle it now feeds.
+    """Re-apply a moved AMS's filament and calibration settings.
 
-    K-profiles are per-nozzle and the printer's calibration table is numbered
-    per-nozzle, but a tray holds exactly one ``cali_idx``. Moving an AMS to the
-    switch's other inlet therefore silently invalidates every configured slot in
-    it: the index stays put and now resolves against the other nozzle's table.
-    Measured on the maintainer's H2C — one spool calibrated 0.018 on the left
-    and 0.020 on the right kept the left profile after the move, and a manual
-    RFID re-read only re-asserted the same wrong one.
+    An FTS move changes the nozzle behind every tray in the AMS. The slot's
+    filament preset is model-and-nozzle aware, and its calibration index is
+    nozzle-specific, but the printer does not reconfigure either one when the
+    switch binding changes. Reusing the normal assignment paths keeps both
+    pieces together and also resets a stale K-profile when the target nozzle
+    has no stored calibration for that spool.
 
-    Configuring a slot is a deliberate preparation step, so this re-selects
-    rather than re-configures: only the calibration binding moves, and only for
-    slots whose spool already has a stored profile for the new nozzle. A slot
-    Bambuddy knows nothing about is left exactly as the operator left it.
+    A slot with no known inventory assignment is left untouched. The callback
+    runs only after the MQTT parser has updated ``ams_switch_inlet``, so the
+    shared assignment helpers resolve the new target nozzle.
     """
     logger = logging.getLogger(__name__)
 
-    target_extruder = extruder_for_inlet(inlet)
-    if target_extruder is None:
+    if extruder_for_inlet(inlet) is None:
         return
 
     client = printer_manager.get_client(printer_id)
     state = printer_manager.get_status(printer_id)
     if not client or not state or not state.raw_data:
         return
-
-    # The nozzle the AMS now feeds -- the diameter of the TARGET extruder, not
-    # of nozzle 0. On a machine with two sizes fitted, moving the inlet changes
-    # the nozzle width, which changes both the K profile to select and the
-    # preset the slot should carry.
-    nozzle_diameter = nozzle_diameter_for_extruder(state, target_extruder, printer_manager.get_model(printer_id))
 
     ams_raw = state.raw_data.get("ams")
     ams_list = ams_raw.get("ams", []) if isinstance(ams_raw, dict) else ams_raw if isinstance(ams_raw, list) else []
@@ -1494,49 +1481,76 @@ async def on_fts_inlet_change(printer_id: int, ams_id: int, inlet: str):
 
     try:
         async with async_session() as db:
+            from backend.app.services.inventory_mode import spoolman_owns_assignments
+
+            if await spoolman_owns_assignments(db):
+                from backend.app.api.routes.spoolman_inventory import (
+                    SpoolSlotAssignmentRequest,
+                    assign_spoolman_slot,
+                )
+                from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
+
+                result = await db.execute(
+                    select(SpoolmanSlotAssignment).where(
+                        SpoolmanSlotAssignment.printer_id == printer_id,
+                        SpoolmanSlotAssignment.ams_id == ams_id,
+                    )
+                )
+                assignments = {row.tray_id: row for row in result.scalars().all()}
+                for tray in unit.get("tray", []):
+                    tray_id = int(tray.get("id", -1))
+                    assignment = assignments.get(tray_id)
+                    if assignment is None or not tray.get("tray_type"):
+                        continue
+                    await assign_spoolman_slot(
+                        SpoolSlotAssignmentRequest(
+                            spoolman_spool_id=assignment.spoolman_spool_id,
+                            printer_id=printer_id,
+                            ams_id=ams_id,
+                            tray_id=tray_id,
+                        ),
+                        db=db,
+                        current_user=None,
+                    )
+                return
+
+            from sqlalchemy.orm import selectinload
+
+            from backend.app.api.routes.inventory import apply_spool_to_slot_via_mqtt
+            from backend.app.models.spool import Spool
+            from backend.app.models.spool_assignment import SpoolAssignment
+
+            result = await db.execute(
+                select(SpoolAssignment).where(
+                    SpoolAssignment.printer_id == printer_id,
+                    SpoolAssignment.ams_id == ams_id,
+                )
+            )
+            assignments = {row.tray_id: row for row in result.scalars().all()}
             for tray in unit.get("tray", []):
                 tray_id = int(tray.get("id", -1))
-                if tray_id < 0 or not tray.get("tray_type"):
+                assignment = assignments.get(tray_id)
+                if assignment is None or not tray.get("tray_type"):
                     continue
-                current_idx = tray.get("cali_idx")
-
-                profile = await find_slot_kprofile_for_extruder(
-                    db,
-                    printer_id,
-                    ams_id,
-                    tray_id,
-                    target_extruder,
-                    nozzle_diameter,
-                    printer_manager.get_model(printer_id),
-                    nozzle_flow_for_extruder(state, target_extruder, printer_manager.get_model(printer_id)),
-                )
-                if profile is None or profile.cali_idx is None:
+                spool = (
+                    await db.execute(
+                        select(Spool).options(selectinload(Spool.k_profiles)).where(Spool.id == assignment.spool_id)
+                    )
+                ).scalar_one_or_none()
+                if spool is None:
                     continue
-                if current_idx == profile.cali_idx:
-                    continue  # Already on the right one.
-
-                logger.info(
-                    "[Printer %s] AMS %s slot %s moved to inlet %s (nozzle %s): "
-                    "re-selecting K-profile %s (cali_idx %s -> %s, K=%s)",
-                    printer_id,
-                    ams_id,
-                    tray_id,
-                    inlet,
-                    target_extruder,
-                    profile.name,
-                    current_idx,
-                    profile.cali_idx,
-                    profile.k_value,
-                )
-                client.extrusion_cali_sel(
+                await apply_spool_to_slot_via_mqtt(
+                    db=db,
+                    current_user=None,
+                    spool=spool,
+                    printer_id=printer_id,
                     ams_id=ams_id,
                     tray_id=tray_id,
-                    cali_idx=profile.cali_idx,
-                    filament_id=printer_safe_filament_id(profile.filament_id, tray.get("tray_info_idx", "")),
-                    nozzle_diameter=nozzle_diameter,
+                    current_tray_info_idx=str(tray.get("tray_info_idx") or ""),
+                    current_tray_type=str(tray.get("tray_type") or ""),
                 )
     except Exception as e:
-        logger.warning("[Printer %s] Could not re-apply K-profiles after inlet move: %s", printer_id, e)
+        logger.warning("[Printer %s] Could not re-apply slot settings after inlet move: %s", printer_id, e)
 
 
 async def on_ams_change(printer_id: int, ams_data: list):
