@@ -765,12 +765,8 @@ class VirtualPrinterInstance:
                         return bool(slicer_opts[field_mqtt])
                     return settings_default
 
-                bed_levelling = _tristate_setting(
-                    await get_setting(db, "default_bed_levelling"), "auto"
-                )
-                flow_cali = _tristate_setting(
-                    await get_setting(db, "default_flow_cali"), "auto"
-                )
+                bed_levelling = _tristate_setting(await get_setting(db, "default_bed_levelling"), "auto")
+                flow_cali = _tristate_setting(await get_setting(db, "default_flow_cali"), "auto")
                 vibration_cali = _slicer_or(
                     "vibration_cali", _bool_setting(await get_setting(db, "default_vibration_cali"), True)
                 )
