@@ -780,6 +780,45 @@ class TestPushStatusCache:
         await bridge.stop()
 
     @pytest.mark.asyncio
+    async def test_a2l_ams_lite_slots_survive_in_slicer_cache(self):
+        """The VP sees raw A2L id 16 but its presence bits are based at 24."""
+        server = _make_server()
+        bridge = _make_bridge(server)
+        await bridge.start()
+
+        bridge._on_printer_raw(
+            f"device/{H2D_SERIAL}/report",
+            json.dumps(
+                {
+                    "print": {
+                        "command": "push_status",
+                        "ams": {
+                            "ams": [
+                                {
+                                    "id": "16",
+                                    "tray": [
+                                        {"id": str(i), "state": 3, "tray_type": material}
+                                        for i, material in enumerate(("PLA", "PETG", "ABS", "TPU"))
+                                    ],
+                                }
+                            ],
+                            # Slots 0-2 loaded (bits 24-26); slot 3 empty.
+                            "tray_exist_bits": "7000000",
+                        },
+                    }
+                }
+            ).encode(),
+        )
+        await asyncio.sleep(0.01)
+
+        unit = bridge.get_latest_print_state()["ams"]["ams"][0]
+        assert unit["id"] == "16"
+        assert [tray["tray_type"] for tray in unit["tray"]] == ["PLA", "PETG", "ABS", ""]
+        assert unit["tray"][3]["state"] == 9
+
+        await bridge.stop()
+
+    @pytest.mark.asyncio
     async def test_tray_exist_bits_shutdown_guard_preserves_cache(self):
         """#765 shutdown guard mirrored at the bridge: when the printer
         powers off it sends all-zero `tray_exist_bits` paired with

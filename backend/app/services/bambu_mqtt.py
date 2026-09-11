@@ -176,6 +176,11 @@ def apply_tray_exist_bits(
             continue
         if not isinstance(ams_id, int):
             continue
+        # The internal MQTT path normalises the A2L AMS-Lite's physical id 16
+        # to id 6 before reaching this helper.  The virtual-printer bridge
+        # parses the raw payload independently and still has id 16, so fold it
+        # here as well; both forms use the presence-bit base 24 (#2697).
+        ams_id = normalize_am_unit_id(ams_id)
         # AMS-HT (n3s, id 128-135): single tray, presence bit at 16+(ams_id-128).
         # Regular AMS (and the A2L-Lite normalised to id 6): ams_id*4 + tray_id.
         # Anything outside those ranges has no known bit layout — don't guess it.

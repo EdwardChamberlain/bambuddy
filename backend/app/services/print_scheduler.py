@@ -70,6 +70,13 @@ _DISPATCH_REVIEW_MESSAGE = (
     "dispatch held for manual review to avoid a duplicate print."
 )
 
+# H2C tool-changer dock positions reported by ``device.nozzle.info``.  The
+# same payload contains hotends under ids 0/1; keeping the ids here means the
+# scheduler can recognise rack stock without depending on a printer-model
+# registry.
+_RACK_NOZZLE_IDS: frozenset[int] = frozenset(range(16, 22))
+_EMPTY_NOZZLE_SERIAL = "N/A"
+
 
 def _queue_status_from_dispatch_telemetry(printer_status, dispatch_subtask_id: str | None) -> str | None:
     """Map telemetry for this exact dispatch to its queue lifecycle state."""
@@ -89,8 +96,49 @@ def _queue_status_from_dispatch_telemetry(printer_status, dispatch_subtask_id: s
     return "dispatching"
 
 
+def _parse_nozzle_diameter(raw) -> float | None:
+    """Return a positive nozzle diameter, or ``None`` for unknown values."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _nozzle_info_by_id(status) -> dict[int, dict]:
+    """Index the H2 ``nozzle.info`` telemetry by its physical nozzle id."""
+    by_id: dict[int, dict] = {}
+    for entry in getattr(status, "nozzle_rack", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            by_id[int(entry.get("id"))] = entry
+        except (TypeError, ValueError):
+            continue
+    return by_id
+
+
+def _nozzle_is_mounted(entry: dict | None) -> bool:
+    """Conservatively determine whether an H2 hotend entry has a nozzle.
+
+    H2 firmware can retain the previous diameter after a hotend has parked its
+    nozzle.  Only the explicit ``serial_number=N/A`` plus a zero temperature
+    rating identifies that state; incomplete telemetry must remain fail-safe.
+    """
+    if entry is None:
+        return True
+    serial = str(entry.get("serial_number") or "").strip().upper()
+    if serial != _EMPTY_NOZZLE_SERIAL:
+        return True
+    try:
+        max_temp = float(entry.get("max_temp") or 0)
+    except (TypeError, ValueError):
+        return True
+    return max_temp > 0
+
+
 def _installed_nozzle_diameters(status) -> list[float]:
-    """Parse the installed nozzle diameters from a PrinterState (#1899).
+    """Parse the mounted hotend diameters from a PrinterState (#1899).
 
     Returns the diameters the printer actually reports (e.g. [0.4] single-nozzle,
     [0.4, 0.6] dual-nozzle), skipping the empty-string defaults that populate a
@@ -98,19 +146,38 @@ def _installed_nozzle_diameters(status) -> list[float]:
     told us its nozzle hardware" — callers must treat that as unknown, not as a
     mismatch, so we never block a print on missing data.
     """
+    info = _nozzle_info_by_id(status)
     diameters: list[float] = []
-    for nozzle in getattr(status, "nozzles", None) or []:
+    for index, nozzle in enumerate(getattr(status, "nozzles", None) or []):
         raw = getattr(nozzle, "nozzle_diameter", "") or ""
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
+        value = _parse_nozzle_diameter(raw)
+        if value is not None and _nozzle_is_mounted(info.get(index)):
             diameters.append(value)
     return diameters
 
 
-def _nozzle_mismatch_message(sliced_nozzle: float | None, installed: list[float]) -> str | None:
+def _rack_nozzle_diameters(status) -> list[float]:
+    """Return positive diameters currently parked in H2C rack slots."""
+    diameters: list[float] = []
+    for nozzle_id, entry in sorted(_nozzle_info_by_id(status).items()):
+        if nozzle_id not in _RACK_NOZZLE_IDS:
+            continue
+        value = _parse_nozzle_diameter(entry.get("diameter") or entry.get("nozzle_diameter"))
+        if value is not None:
+            diameters.append(value)
+    return diameters
+
+
+def _format_nozzle_diameters(diameters: list[float]) -> str:
+    """Format diameters once each, preserving telemetry order."""
+    return " / ".join(f"{d:g}mm" for d in dict.fromkeys(diameters))
+
+
+def _nozzle_mismatch_message(
+    sliced_nozzle: float | None,
+    installed: list[float],
+    rack: list[float] | None = None,
+) -> str | None:
     """Return an actionable error message when the sliced nozzle can't be
     printed on any installed nozzle, else None (#1899).
 
@@ -121,15 +188,18 @@ def _nozzle_mismatch_message(sliced_nozzle: float | None, installed: list[float]
     The 0.05 tolerance absorbs float noise while staying well inside the 0.2
     gap between adjacent nozzle sizes (0.2/0.4/0.6/0.8).
     """
-    if not sliced_nozzle or not installed:
+    reachable = [*installed, *(rack or [])]
+    if not sliced_nozzle or not reachable:
         return None
-    if any(abs(d - sliced_nozzle) < 0.05 for d in installed):
+    if any(abs(d - sliced_nozzle) < 0.05 for d in reachable):
         return None
-    installed_str = " / ".join(f"{d:g}mm" for d in installed)
+    where = f"{_format_nozzle_diameters(installed)} installed" if installed else "no nozzle mounted"
+    if rack:
+        where += f" and {_format_nozzle_diameters(rack)} in the nozzle rack"
     return (
         f"File sliced for a {sliced_nozzle:g}mm nozzle, but the printer has "
-        f"{installed_str} installed. Re-slice for the installed nozzle, or "
-        f"install the matching nozzle before printing."
+        f"{where}. Re-slice for an available nozzle, or fit the matching "
+        f"nozzle before printing."
     )
 
 
@@ -2716,10 +2786,15 @@ class PrintScheduler:
         # print proceed exactly as before. On dual-nozzle printers (H2D) a match
         # against EITHER installed nozzle passes, so a 0.6 slice is fine as long
         # as one of the two hotends is a 0.6.
+        # H2C tool-changer rack positions are reachable too: the printer fetches
+        # a docked nozzle during dispatch, so they must be considered before the
+        # guard runs (the rack picker is not reached after a mismatch failure).
         sliced_nozzle = archive.nozzle_diameter if archive else None
         if sliced_nozzle:
-            installed = _installed_nozzle_diameters(printer_manager.get_status(item.printer_id))
-            mismatch_msg = _nozzle_mismatch_message(sliced_nozzle, installed)
+            nozzle_status = printer_manager.get_status(item.printer_id)
+            installed = _installed_nozzle_diameters(nozzle_status)
+            rack = _rack_nozzle_diameters(nozzle_status)
+            mismatch_msg = _nozzle_mismatch_message(sliced_nozzle, installed, rack)
             if mismatch_msg:
                 item.status = "failed"
                 item.error_message = mismatch_msg

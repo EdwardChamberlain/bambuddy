@@ -27,12 +27,28 @@ from backend.app.services.print_scheduler import (
     PrintScheduler,
     _installed_nozzle_diameters,
     _nozzle_mismatch_message,
+    _rack_nozzle_diameters,
 )
 
 
 def _state(*diameters: str):
     """PrinterState-shaped namespace with the given nozzle diameter strings."""
     return SimpleNamespace(nozzles=[SimpleNamespace(nozzle_diameter=d) for d in diameters])
+
+
+def _h2c_state():
+    """H2C telemetry with two mounted 0.4 hotends and rack stock."""
+    return SimpleNamespace(
+        nozzles=[SimpleNamespace(nozzle_diameter="0.4"), SimpleNamespace(nozzle_diameter="0.4")],
+        nozzle_rack=[
+            {"id": 0, "diameter": "0.4", "max_temp": 350, "serial_number": "SN-L"},
+            # This entry retains a stale diameter after the hotend is parked.
+            {"id": 1, "diameter": "0.4", "max_temp": 0, "serial_number": "N/A"},
+            {"id": 16, "diameter": "0.4"},
+            {"id": 18, "diameter": "0.6"},
+            {"id": 21, "diameter": "0.2"},
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +129,37 @@ def test_adjacent_sizes_are_distinguished():
     assert _nozzle_mismatch_message(0.6, [0.8]) is not None
 
 
+def test_rack_nozzle_counts_as_reachable():
+    status = _h2c_state()
+    installed = _installed_nozzle_diameters(status)
+    rack = _rack_nozzle_diameters(status)
+    assert installed == [0.4]
+    assert rack == [0.4, 0.6, 0.2]
+    assert _nozzle_mismatch_message(0.2, installed, rack) is None
+    assert _nozzle_mismatch_message(0.6, installed, rack) is None
+
+
+def test_rack_missing_diameter_still_blocks():
+    status = _h2c_state()
+    msg = _nozzle_mismatch_message(0.8, _installed_nozzle_diameters(status), _rack_nozzle_diameters(status))
+    assert msg is not None
+    assert "0.4mm installed" in msg
+    assert "0.4mm / 0.6mm / 0.2mm in the nozzle rack" in msg
+
+
+def test_nozzle_rack_ignores_non_rack_and_unparseable_entries():
+    status = SimpleNamespace(
+        nozzle_rack=[
+            {"id": 0, "diameter": "0.4"},
+            {"id": 16, "diameter": ""},
+            {"id": 17, "diameter": "abc"},
+            {"id": 18, "nozzle_diameter": "0.6"},
+            "not-a-dict",
+        ]
+    )
+    assert _rack_nozzle_diameters(status) == [0.6]
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: the guard fires inside _start_print BEFORE upload
 # ---------------------------------------------------------------------------
@@ -184,9 +231,12 @@ async def archive_case(tmp_path):
         await engine.dispose()
 
 
-async def _run_start_print(ctx, *, installed_nozzles):
+async def _run_start_print(ctx, *, installed_nozzles, nozzle_rack=None):
     scheduler = PrintScheduler()
-    status = SimpleNamespace(nozzles=[SimpleNamespace(nozzle_diameter=d) for d in installed_nozzles])
+    status = SimpleNamespace(
+        nozzles=[SimpleNamespace(nozzle_diameter=d) for d in installed_nozzles],
+        nozzle_rack=nozzle_rack or [],
+    )
     # The mismatch case returns before the upload path; the match case drives it
     # to start_print, so mirror the post-guard dependency patches the
     # cleanup-library harness uses (get_ftp_retry_settings et al. open their own
@@ -239,6 +289,18 @@ async def test_start_print_proceeds_when_nozzle_matches(archive_case):
     (item leaves 'pending', start_print is reached)."""
     ctx = await archive_case(sliced_nozzle=0.6)
     await _run_start_print(ctx, installed_nozzles=["0.6"])
+
+    async with ctx.session_maker() as db:
+        item = await db.get(PrintQueueItem, ctx.queue_item_id)
+    assert item.status != "failed"
+    ctx.start_print.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_start_print_proceeds_when_matching_nozzle_is_in_rack(archive_case):
+    """An H2C may fetch a matching nozzle from its tool-changer rack."""
+    ctx = await archive_case(sliced_nozzle=0.2)
+    await _run_start_print(ctx, installed_nozzles=["0.4", "0.4"], nozzle_rack=[{"id": 21, "diameter": "0.2"}])
 
     async with ctx.session_maker() as db:
         item = await db.get(PrintQueueItem, ctx.queue_item_id)

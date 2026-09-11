@@ -1313,6 +1313,24 @@ class TestApplyTrayExistBitsHelper:
         assert units[0]["tray"][0]["tray_type"] == "PLA"
         assert units[0]["tray"][1]["tray_type"] == ""
 
+    def test_a2l_physical_unit_id_uses_normalized_presence_bits(self):
+        """Raw A2L id 16 and internal id 6 share presence-bit base 24."""
+        from backend.app.services.bambu_mqtt import apply_tray_exist_bits
+
+        units = [
+            {
+                "id": "16",
+                "tray": [
+                    {"id": str(i), "tray_type": material, "tray_color": "FFFFFFFF"}
+                    for i, material in enumerate(("PLA", "PETG", "ABS", "TPU"))
+                ],
+            }
+        ]
+        # Bits 24, 25 and 26 are present; bit 27 is empty.
+        cleared = apply_tray_exist_bits(units, "7000000", power_on_flag=True)
+        assert cleared == 1
+        assert [tray["tray_type"] for tray in units[0]["tray"]] == ["PLA", "PETG", "ABS", ""]
+
     def test_multi_ams_global_bit_math(self):
         """global_bit = ams_id * 4 + tray_id. Verify AMS 1 slots use
         bits 4-7 of the mask, not bits 0-3."""
