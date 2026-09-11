@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 # state value did change. SLICING is included because some firmwares park
 # briefly in SLICING between PREPARE and RUNNING while parsing the g-code.
 _ACTIVE_PRINT_STATES: frozenset[str] = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
+# Conservative rollout default: existing installations retain one printer
+# session at a time until an operator explicitly raises the limit.
+DEFAULT_QUEUE_MAX_CONCURRENT_UPLOADS = 1
+MAX_QUEUE_CONCURRENT_UPLOADS = 16
 _WAITING_FOR_DRYING_MESSAGE = "Waiting for AMS drying to complete"
 _STOPPING_DRYING_MESSAGE = "Stopping AMS drying before dispatch"
 _DRYING_STOP_FAILED_MESSAGE = "Unable to stop AMS drying; waiting to retry"
@@ -223,6 +227,7 @@ class PrintScheduler:
         self._running = False
         self._heat_soak = ChamberHeatSoak()
         self._check_interval = 30  # seconds
+        self._fast_check_interval = 3  # seconds while dispatch work is draining
         self._power_on_wait_time = 180  # seconds to wait for printer after power on (3 min)
         self._power_on_check_interval = 10  # seconds between connection checks
         # Track which printers are currently auto-drying (printer_id -> start timestamp)
@@ -230,6 +235,10 @@ class PrintScheduler:
         # Recovery completion is deliberately asynchronous, so do not start a
         # second completion chain if a slow side effect overlaps the next tick.
         self._terminal_dispatch_recoveries: set[int] = set()
+        # Queue rows remain pending while their per-item worker uploads and
+        # prepares the durable dispatch reservation. Keep them out of later
+        # selection passes and release the slot on every task outcome.
+        self._inflight: dict[int, tuple[asyncio.Task, int | None]] = {}
 
     async def run(self):
         """Main loop - check queue every interval."""
@@ -237,16 +246,22 @@ class PrintScheduler:
         logger.info("Print scheduler started")
 
         while self._running:
+            dispatched = False
             try:
-                await self.check_queue()
+                dispatched = await self.check_queue()
             except Exception as e:
                 logger.error("Scheduler error: %s", e)
 
-            await asyncio.sleep(self._check_interval)
+            await asyncio.sleep(self._fast_check_interval if dispatched else self._check_interval)
 
     def stop(self):
         """Stop the scheduler."""
         self._running = False
+        # App shutdown also cancels the global task registry. Cancelling here
+        # prevents a same-process restart from retaining upload reservations.
+        for task, _printer_id in tuple(self._inflight.values()):
+            if not task.done():
+                task.cancel()
         logger.info("Print scheduler stopped")
 
     async def _recover_stale_dispatches(self, db: AsyncSession) -> None:
@@ -378,8 +393,8 @@ class PrintScheduler:
             spawn_background_task(self._dispatch_after_heat_soak(item_id), name=f"heat-soak-dispatch-{item_id}")
         return set((await db.scalars(select(Printer.id).where(Printer.heat_soak_shutdown_pending.is_(True)))).all())
 
-    async def check_queue(self):
-        """Check for prints ready to start."""
+    async def check_queue(self) -> bool:
+        """Check for prints ready to start and report whether to tick quickly."""
         async with async_session() as db:
             shutdown_printers = await self._check_heat_soaks(db)
             await self._recover_stale_dispatches(db)
@@ -410,6 +425,13 @@ class PrintScheduler:
                     .order_by(PrintQueueItem.printer_id, PrintQueueItem.position)
                 )
             items = list(result.scalars().all())
+            original_printer_ids = {item.id: item.printer_id for item in items}
+
+            # Upload workers leave rows pending until they establish the
+            # durable dispatch reservation. Exclude those rows so a fast tick
+            # cannot send the same file twice.
+            if self._inflight:
+                items = [item for item in items if item.id not in self._inflight]
 
             # Read plate-clear setting once per queue check
             require_plate_clear = await self._get_bool_setting(db, "require_plate_clear", default=True)
@@ -423,10 +445,15 @@ class PrintScheduler:
 
             busy_printers.update(shutdown_printers)
 
+            # The durable status does not change until the upload completes;
+            # reserve each worker's printer in memory for the same interval.
+            busy_printers.update(pid for _task, pid in self._inflight.values() if pid is not None)
+
             if not items:
-                # No pending items — still check auto-drying on idle printers
+                # No dispatchable items — still check auto-drying, but do not
+                # dry a printer whose upload is about to start printing.
                 await self._check_auto_drying(db, [], busy_printers, require_plate_clear=require_plate_clear)
-                return
+                return bool(self._inflight)
 
             logger.info(
                 "Queue check: found %d pending items: %s",
@@ -446,6 +473,32 @@ class PrintScheduler:
 
             # Log skip reasons once per queue check (not per item)
             skip_reasons: dict[str, int] = {}
+
+            # Selection is synchronous; the actual upload/session work is
+            # launched after all queue decisions have been committed.
+            dispatch_ids: list[int] = []
+
+            # A direct printer-card upload consumes its transient library row.
+            # Do not let two concurrent workers archive/delete the same row.
+            # Ordinary library prints only read the row and may still fan out.
+            dispatch_libs: set[int] = set()
+            consumed_libs: set[int] = set()
+
+            def _library_row_conflict(candidate: PrintQueueItem) -> bool:
+                library_id = candidate.library_file_id
+                if library_id is None:
+                    return False
+                if candidate.cleanup_library_after_dispatch:
+                    return library_id in dispatch_libs
+                return library_id in consumed_libs
+
+            def _claim_library_row(candidate: PrintQueueItem) -> None:
+                library_id = candidate.library_file_id
+                if library_id is None:
+                    return
+                dispatch_libs.add(library_id)
+                if candidate.cleanup_library_after_dispatch:
+                    consumed_libs.add(library_id)
 
             for item in items:
                 # Check scheduled time first (scheduled_time is stored in UTC from ISO string)
@@ -476,6 +529,8 @@ class PrintScheduler:
                 if item.printer_id:
                     # Specific printer assignment (existing behavior)
                     if item.printer_id in busy_printers:
+                        item.waiting_reason = f"Waiting for printer reservation on printer {item.printer_id}"
+                        await db.commit()
                         continue
 
                     # Check if printer is idle
@@ -516,7 +571,9 @@ class PrintScheduler:
 
                     # Check if printer is idle (busy with another print)
                     if not printer_idle:
+                        item.waiting_reason = f"Waiting for printer reservation on printer {item.printer_id}"
                         busy_printers.add(item.printer_id)
+                        await db.commit()
                         continue
 
                     # Check condition (previous print success)
@@ -615,8 +672,18 @@ class PrintScheduler:
                         busy_printers.add(item.printer_id)
                         continue
 
-                    # Start the print
-                    await self._start_print(db, item)
+                    # Cleanup uploads consume their source library row. Hold a
+                    # conflicting item for the next pass rather than racing a
+                    # delete/unlink against another worker's upload.
+                    if _library_row_conflict(item):
+                        skip_reasons["library_row_in_use"] = skip_reasons.get("library_row_in_use", 0) + 1
+                        busy_printers.add(item.printer_id)
+                        continue
+
+                    _claim_library_row(item)
+                    if item.waiting_reason and item.waiting_reason.startswith("Waiting for printer reservation"):
+                        item.waiting_reason = None
+                    dispatch_ids.append(item.id)
                     busy_printers.add(item.printer_id)
 
                     # SJF starvation guard: mark items that were jumped
@@ -769,7 +836,12 @@ class PrintScheduler:
                             busy_printers.add(printer_id)
                             continue
 
-                        await self._start_print(db, item)
+                        if _library_row_conflict(item):
+                            skip_reasons["library_row_in_use"] = skip_reasons.get("library_row_in_use", 0) + 1
+                            continue
+
+                        _claim_library_row(item)
+                        dispatch_ids.append(item.id)
                         busy_printers.add(printer_id)
 
                         # SJF starvation guard: mark model-based items that were jumped
@@ -809,8 +881,133 @@ class PrintScheduler:
                         awaiting,
                     )
 
+            upload_limit = max(
+                1,
+                min(
+                    MAX_QUEUE_CONCURRENT_UPLOADS,
+                    await self._get_int_setting(
+                        db,
+                        "queue_max_concurrent_uploads",
+                        default=DEFAULT_QUEUE_MAX_CONCURRENT_UPLOADS,
+                    ),
+                ),
+            )
+            available_slots = max(0, upload_limit - len(self._inflight))
+            deferred_ids = set(dispatch_ids[available_slots:])
+            pool_waiting_reason = (
+                f"Waiting for upload slot ({len(self._inflight)} of {upload_limit} in use)"
+            )
+            for item in items:
+                if item.id in deferred_ids:
+                    item.waiting_reason = pool_waiting_reason
+                elif item.id in dispatch_ids and item.waiting_reason == pool_waiting_reason:
+                    item.waiting_reason = None
+
+            # Persist model-to-printer assignments and waiting explanations
+            # before workers open their own sessions. This also releases the
+            # scheduler's connection during slow FTP transfers.
+            assignment_changed = any(item.printer_id != original_printer_ids.get(item.id) for item in items)
+            if dispatch_ids or assignment_changed:
+                await db.commit()
+
+            if dispatch_ids:
+                item_printers = {item.id: item.printer_id for item in items}
+                self._launch_uploads(dispatch_ids, item_printers, upload_limit, {item.id: item for item in items})
+                # Give newly-created workers one turn to acquire their own
+                # sessions and reach the first I/O await. The scheduler still
+                # returns without waiting for uploads to finish.
+                await asyncio.sleep(0)
+
             # Auto-drying: start drying on idle printers that have no pending queue items
             await self._check_auto_drying(db, items, busy_printers, require_plate_clear=require_plate_clear)
+
+            # Keep checking quickly while workers are active or work was selected
+            # but deferred by a full pool.
+            return bool(dispatch_ids) or bool(self._inflight)
+
+    def _launch_uploads(
+        self,
+        item_ids: list[int],
+        item_printers: dict[int, int | None],
+        limit: int,
+        item_snapshots: dict[int, PrintQueueItem] | None = None,
+    ) -> None:
+        """Launch independent queue workers into the bounded upload pool.
+
+        Each worker owns its database session. The pool is refillable across
+        scheduler ticks, so a slow printer cannot hold an unused slot hostage
+        while other printers wait, and a worker failure cannot cancel siblings.
+        """
+        occupied_printers = {
+            printer_id for _task, printer_id in self._inflight.values() if printer_id is not None
+        }
+        candidates: list[int] = []
+        reserved_printers = set(occupied_printers)
+        for item_id in item_ids:
+            if item_id in self._inflight:
+                continue
+            printer_id = item_printers.get(item_id)
+            if printer_id is not None and printer_id in reserved_printers:
+                logger.info(
+                    "Queue item %s waiting for printer reservation %s; another dispatch is active",
+                    item_id,
+                    printer_id,
+                )
+                continue
+            if printer_id is not None:
+                reserved_printers.add(printer_id)
+            candidates.append(item_id)
+
+        free = max(0, limit - len(self._inflight))
+        if free <= 0:
+            logger.info(
+                "Upload pool full (%d/%d in flight); deferring %d queue item(s)",
+                len(self._inflight),
+                limit,
+                len(candidates),
+            )
+            return
+
+        for item_id in candidates[:free]:
+            snapshot = (item_snapshots or {}).get(item_id)
+
+            async def _run_dispatch(
+                selected_item_id: int = item_id,
+                selected_snapshot: PrintQueueItem | None = snapshot,
+            ) -> None:
+                if selected_snapshot is None:
+                    await self._dispatch_one(selected_item_id)
+                else:
+                    await self._dispatch_one(selected_item_id, selected_snapshot)
+
+            task = spawn_background_task(
+                _run_dispatch(),
+                name=f"queue-upload-{item_id}",
+            )
+            self._inflight[item_id] = (task, item_printers.get(item_id))
+            task.add_done_callback(lambda _task, queue_item_id=item_id: self._inflight.pop(queue_item_id, None))
+
+        if len(candidates) > free:
+            logger.info(
+                "Upload pool launched %d/%d queue item(s); %d remain pending for the next tick",
+                free,
+                len(candidates),
+                len(candidates) - free,
+            )
+
+    async def _dispatch_one(self, item_id: int, fallback_item: PrintQueueItem | None = None) -> None:
+        """Run one upload/dispatch with an isolated session."""
+        async with async_session() as item_db:
+            item = await item_db.get(PrintQueueItem, item_id)
+            # The fallback keeps lightweight callers/tests that provide a
+            # session without ORM ``get`` semantics compatible. Production
+            # sessions always return the durable row by id.
+            if not item or not isinstance(getattr(item, "id", None), int):
+                item = fallback_item
+            if not item:
+                logger.info("Queue item %s vanished before dispatch", item_id)
+                return
+            await self._start_print(item_db, item)
 
     async def _find_idle_printer_for_model(
         self,
@@ -1976,6 +2173,21 @@ class PrintScheduler:
         if setting:
             return setting.value.lower() == "true"
         return default
+
+    async def _get_int_setting(self, db: AsyncSession, key: str, default: int) -> int:
+        """Read an integer setting, falling back safely for legacy rows."""
+        try:
+            value = await self._get_setting(db, key)
+        except StopAsyncIteration:
+            # A few lightweight scheduler tests provide a finite mocked query
+            # sequence from before this optional setting existed. A missing
+            # mocked row has the same semantics as an absent persisted row.
+            value = None
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            logger.warning("Invalid integer setting %s=%r; using %s", key, value, default)
+            return default
 
     async def _get_drying_presets(self, db: AsyncSession) -> dict[str, dict[str, int]]:
         """Get drying presets (user-configured or built-in defaults)."""

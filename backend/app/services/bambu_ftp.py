@@ -8,6 +8,7 @@ import threading
 import time
 import weakref
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from ftplib import FTP, FTP_TLS  # nosec B402
 from io import BytesIO
@@ -17,6 +18,13 @@ from typing import TypeVar
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# FTP operations are blocking and can last for minutes during a large upload.
+# Keep concurrent queue dispatches out of asyncio's shared default executor so
+# they cannot starve unrelated application work. The scheduler's setting caps
+# queue uploads at 16; headroom also covers browsing, downloads, and deletes.
+_FTP_MAX_WORKERS = 48
+_ftp_executor = ThreadPoolExecutor(max_workers=_FTP_MAX_WORKERS, thread_name_prefix="bambu-ftp")
 
 # A flat wall-clock cap punishes large files on slow but healthy links. Use a
 # deliberately pessimistic throughput floor as a backstop instead; a dead link
@@ -956,7 +964,7 @@ async def download_file_async(
         done = threading.Event()
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(None, _download, force_prot_c, completion, done), timeout=timeout
+                loop.run_in_executor(_ftp_executor, _download, force_prot_c, completion, done), timeout=timeout
             )
         except TimeoutError:
             # Slow WiFi links commonly overshoot ftp_timeout by 10–30 s without
@@ -1051,7 +1059,7 @@ async def download_file_try_paths_async(
             client.disconnect()
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _download), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP download_try_paths exceeded its %ss cap for %s", timeout, ip_address)
         return False
@@ -1149,7 +1157,7 @@ async def upload_file_async(
 
     async def _attempt(force_prot_c: bool) -> bool:
         """Run one worker attempt and cooperatively stop it on timeout."""
-        fut = loop.run_in_executor(None, lambda: _upload(force_prot_c))
+        fut = loop.run_in_executor(_ftp_executor, lambda: _upload(force_prot_c))
         try:
             return await asyncio.wait_for(asyncio.shield(fut), timeout=deadline)
         except TimeoutError:
@@ -1237,7 +1245,7 @@ async def list_files_async(
         return []
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _list), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _list), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP list_files timed out after %ss for %s", timeout, path)
         return []
@@ -1281,7 +1289,7 @@ async def delete_file_async(
         return DeleteResult.FAILED
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _delete), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _delete), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP delete_file exceeded its %ss cap for %s", timeout, ip_address)
         return DeleteResult.FAILED
@@ -1321,7 +1329,7 @@ async def download_file_bytes_async(
         return None
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _download), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _download), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP download_bytes exceeded its %ss cap for %s", timeout, ip_address)
         return None
@@ -1360,7 +1368,7 @@ async def get_storage_info_async(
         return None
 
     try:
-        return await asyncio.wait_for(loop.run_in_executor(None, _get_storage), timeout=timeout)
+        return await asyncio.wait_for(loop.run_in_executor(_ftp_executor, _get_storage), timeout=timeout)
     except TimeoutError:
         logger.warning("FTP get_storage_info exceeded its %ss cap for %s", timeout, ip_address)
         return None

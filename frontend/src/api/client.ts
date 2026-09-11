@@ -1238,6 +1238,8 @@ export interface AppSettings {
   require_plate_clear: boolean;
   // Shortest job first scheduling
   queue_shortest_first: boolean;
+  // Maximum independent printer uploads/sessions in flight
+  queue_max_concurrent_uploads: number;
   // User-configurable presets for the printer-card popovers (JSON arrays of 3 ints).
   // Empty string = use built-in defaults.
   nozzle_temp_presets: string;
