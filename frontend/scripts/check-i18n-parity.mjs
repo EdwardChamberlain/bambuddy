@@ -220,7 +220,7 @@ const IT_COGNATES = [
   'Bambu Cloud', 'Orca Cloud',  // brand names — same in every locale
   'AMS Filament Backup',  // Bambu Lab product/firmware feature name
   'Email',  // common loanword in Italian, used verbatim in UI labels
-  'Pipeline',  // #1425 — Slicer Pipelines (cognate in IT)
+  'Pipeline', 'slicing',  // #1425 — Slicer Pipelines (cognate in IT)
   'Status', 'Tag', 'Tags', 'Online', 'Offline', 'Standard', 'Filament',
   'Filaments', 'Software', 'Hardware', 'Stop', 'Reset', 'Test', 'Code',
   'Token', 'Server', 'Port', 'Plate', 'Layer', 'Modal', 'Pin', 'Pro', 'Mini',

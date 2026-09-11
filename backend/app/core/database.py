@@ -261,6 +261,7 @@ async def init_db():
         oidc_provider,
         orca_base_cache,
         pending_upload,
+        pipeline_run,
         print_batch,
         print_log,
         print_queue,
@@ -954,6 +955,15 @@ async def run_migrations(conn):
     swallowed.
     """
     from sqlalchemy import text
+
+    # Migration: Add source_archive_id column to pipeline_runs (#1425 PR B follow-up).
+    # Allows a pipeline run to source from an archive's source 3MF in addition
+    # to a library file. Idempotent — _safe_execute swallows the "already exists"
+    # case on both SQLite and Postgres.
+    await _safe_execute(
+        conn,
+        "ALTER TABLE pipeline_runs ADD COLUMN source_archive_id INTEGER REFERENCES print_archives(id) ON DELETE SET NULL",
+    )
 
     # Migration: Add is_favorite column to print_archives
     await _safe_execute(conn, "ALTER TABLE print_archives ADD COLUMN is_favorite BOOLEAN DEFAULT 0")

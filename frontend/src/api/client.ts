@@ -1585,9 +1585,85 @@ export interface SlicerPipelineCreateRequest {
   filament_presets: PresetRef[];
   bed_type?: string | null;
 }
-export type SlicerPipelineUpdateRequest = Partial<SlicerPipelineCreateRequest>;
+export type SlicerPipelineUpdateRequest = Partial<SlicerPipelineCreateRequest> & {
+  target_kind?: 'specific_printer' | 'printer_class';
+  // ``target_printer_id: 0`` means "clear the target" — the backend maps that
+  // to null. Use null in TypeScript for the same intent.
+  target_printer_id?: number | null;
+};
 export interface SlicerPipelinesListResponse {
   pipelines: SlicerPipeline[];
+}
+
+// Slicer Pipeline runs (#1425 PR B)
+export type PipelineEligibilityKind =
+  | 'printer_not_set'
+  | 'printer_not_found'
+  | 'printer_disabled'
+  | 'printer_offline'
+  | 'filament_type_mismatch'
+  | 'filament_color_mismatch'
+  | 'ams_slot_missing'
+  | 'filament_unverified';
+export interface PipelineEligibilityIssue {
+  kind: PipelineEligibilityKind;
+  slot_index: number | null;
+  expected: string | null;
+  actual: string | null;
+}
+export interface PipelineEligibilityReport {
+  ok: boolean;
+  target_printer_id: number | null;
+  target_printer_name: string | null;
+  issues: PipelineEligibilityIssue[];
+}
+export interface PipelineJob {
+  id: number;
+  pipeline_run_id: number;
+  copy_index: number;
+  assigned_printer_id: number | null;
+  assigned_printer_name: string | null;
+  queue_entry_id: number | null;
+  status:
+    | 'pending'
+    | 'awaiting_printer'
+    | 'queued'
+    | 'printing'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  error_message: string | null;
+  dispatched_at: string | null;
+  completed_at: string | null;
+}
+export interface PipelineRun {
+  id: number;
+  pipeline_id: number | null;
+  pipeline_name: string | null;
+  source_library_file_id: number | null;
+  source_archive_id: number | null;
+  source_filename: string | null;
+  copies: number;
+  status:
+    | 'queued'
+    | 'slicing'
+    | 'dispatching'
+    | 'in_progress'
+    | 'completed'
+    | 'failed'
+    | 'cancelled';
+  slice_job_id: number | null;
+  sliced_library_file_id: number | null;
+  eligibility_overridden: boolean;
+  error_message: string | null;
+  created_by: number | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  jobs: PipelineJob[];
+}
+export interface PipelineRunListResponse {
+  runs: PipelineRun[];
 }
 
 export interface SliceResponse {
@@ -3184,6 +3260,7 @@ export type Permission =
   | 'api_keys:read' | 'api_keys:create' | 'api_keys:update' | 'api_keys:delete'
   | 'users:read' | 'users:create' | 'users:update' | 'users:delete'
   | 'groups:read' | 'groups:create' | 'groups:update' | 'groups:delete'
+  | 'pipelines:read' | 'pipelines:write' | 'pipelines:run'
   | 'websocket:connect';
 
 // Group types
@@ -6424,6 +6501,40 @@ export const api = {
     }),
   deleteSlicerPipeline: (id: number) =>
     request<void>(`/slicer-pipelines/${id}`, { method: 'DELETE' }),
+  checkPipelineEligibility: (
+    pipelineId: number,
+    source: { kind: 'libraryFile'; id: number } | { kind: 'archive'; id: number },
+  ) =>
+    request<PipelineEligibilityReport>(`/slicer-pipelines/${pipelineId}/check-eligibility`, {
+      method: 'POST',
+      body: JSON.stringify(
+        source.kind === 'libraryFile'
+          ? { source_library_file_id: source.id }
+          : { source_archive_id: source.id },
+      ),
+    }),
+  runPipeline: (
+    pipelineId: number,
+    source: { kind: 'libraryFile'; id: number } | { kind: 'archive'; id: number },
+    force = false,
+  ) =>
+    request<PipelineRun>(`/slicer-pipelines/${pipelineId}/run`, {
+      method: 'POST',
+      body: JSON.stringify({
+        ...(source.kind === 'libraryFile'
+          ? { source_library_file_id: source.id }
+          : { source_archive_id: source.id }),
+        force,
+      }),
+    }),
+  listPipelineRuns: (pipelineId: number, limit = 5) =>
+    request<PipelineRunListResponse>(
+      `/slicer-pipelines/${pipelineId}/runs?limit=${limit}`,
+    ),
+  getPipelineRun: (runId: number) =>
+    request<PipelineRun>(`/pipeline-runs/${runId}`),
+  cancelPipelineRun: (runId: number) =>
+    request<PipelineRun>(`/pipeline-runs/${runId}/cancel`, { method: 'POST' }),
 
   // Canonical Bambu printer-model registry — "Bambu Lab <model>" → short code.
   // Single source of truth shared with backend (PRINTER_MODEL_MAP); the

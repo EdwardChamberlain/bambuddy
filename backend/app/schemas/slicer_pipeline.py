@@ -47,6 +47,13 @@ class SlicerPipelineUpdate(BaseModel):
     filament_presets: list[PresetRef] | None = Field(default=None, min_length=1)
     bed_type: str | None = Field(default=None, max_length=64)
 
+    # PR B target binding. ``target_kind='specific_printer'`` requires
+    # ``target_printer_id`` to be set OR cleared in the same payload (route
+    # handler enforces). ``target_kind='printer_class'`` is the PR A default;
+    # PR B leaves the class column unwired (PR C wires it).
+    target_kind: Literal["specific_printer", "printer_class"] | None = None
+    target_printer_id: int | None = None
+
 
 class SlicerPipelineResponse(SlicerPipelineBase):
     """A single pipeline as returned by the API."""

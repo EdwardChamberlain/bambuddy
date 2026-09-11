@@ -2617,6 +2617,8 @@ export default {
       field: {
         name: 'Pipeline name',
         description: 'Description',
+        targetPrinter: 'Target printer',
+        noTarget: '— No target —',
       },
       action: {
         save: 'Save',
@@ -2636,6 +2638,21 @@ export default {
         saveFailed: 'Save failed',
         deleted: 'Pipeline deleted',
         deleteFailed: 'Delete failed',
+      },
+      // PR B target binding + last-run summary
+      noTargetHint: 'Set a target printer to run this',
+      noTargetWarning: 'Set a target printer before running this pipeline.',
+      runs: {
+        lastRun: 'Last run',
+        status: {
+          queued: 'queued',
+          slicing: 'slicing',
+          dispatching: 'dispatching',
+          in_progress: 'printing',
+          completed: 'completed',
+          failed: 'failed',
+          cancelled: 'cancelled',
+        },
       },
     },
   },
@@ -3858,6 +3875,39 @@ export default {
     deleteConfirm: 'Are you sure you want to delete this filament?',
     importFromPrinter: 'Import from Printer',
     exportToFile: 'Export to File',
+    // Slicer Pipelines run from the File Manager (#1425 PR B). The Run-with-pipeline
+    // modal is a two-step dialog: pick a pipeline, then either fire (eligibility ok)
+    // or confirm-and-fire (eligibility report shown). Lives in components/RunWithPipelineModal.tsx.
+    runWithPipeline: {
+      actionLabel: 'Run with pipeline',
+      noPermission: 'You do not have permission to run pipelines',
+      modalTitle: 'Run with pipeline',
+      confirmTitle: 'Confirm run',
+      confirmIntro: 'Pre-flight found issues with this run',
+      sourceHint: 'Source',
+      pipelineHint: 'Pipeline',
+      targetHint: 'Target',
+      pipelineListAria: 'Available pipelines',
+      runAnyway: 'Run anyway',
+      loading: 'Loading…',
+      empty: 'No pipelines saved yet. Open the Slice dialog and click "Save as pipeline" to create one.',
+      noTarget: 'No target printer set',
+      noTargetMessage: 'This pipeline has no target printer set. Open it in Settings to pick one.',
+      toast: {
+        started: 'Pipeline run started',
+        failed: 'Could not start run',
+      },
+      issue: {
+        printerNotSet: 'No target printer set on this pipeline.',
+        printerNotFound: 'Target printer no longer exists.',
+        printerDisabled: 'Target printer is disabled.',
+        printerOffline: 'Target printer is offline.',
+        filamentType: 'Filament slot {{slot}}: expected {{expected}}, AMS has {{actual}}',
+        filamentColor: 'Filament slot {{slot}}: colour differs (expected {{expected}}, AMS has {{actual}})',
+        amsSlotMissing: 'AMS slot {{slot}} not available on this printer',
+        filamentUnverified: 'Filament slot {{slot}} comes from a cloud / standard preset and could not be statically verified.',
+      },
+    },
   },
 
   // Slice (slicer-API integration via SliceModal)
