@@ -46,6 +46,7 @@ export default {
 
   // Common
   common: {
+    plusNMore: '+{{count}} more',
     save: 'Save',
     saving: 'Saving...',
     cancel: 'Cancel',
@@ -4395,6 +4396,7 @@ export default {
   // Print modal
   printModal: {
     variants: {
+      editNote: 'These alternatives were set when the job was queued. Cancel and re-queue to change them.',
       title: 'Printer alternatives',
       help: 'One job, one queue slot. The first matching printer to free up runs its file.',
       unknownModel: 'Unknown model',
