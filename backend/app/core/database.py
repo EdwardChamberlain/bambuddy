@@ -556,6 +556,7 @@ _QUEUE_INSERT_COLUMN_DEFINITIONS: dict[str, tuple[str, str]] = {
     "nozzle_offset_cali": ("VARCHAR(8) DEFAULT 'auto'", "VARCHAR(8) DEFAULT 'auto'"),
     # Lifecycle / audit fields
     "status": ("VARCHAR(20) DEFAULT 'pending'", "VARCHAR(20) DEFAULT 'pending'"),
+    "dispatching_at": ("DATETIME", "TIMESTAMP"),
     "gate_acknowledged": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     "dispatched_at": ("DATETIME", "TIMESTAMP"),
     "dispatch_subtask_id": ("VARCHAR(32)", "VARCHAR(32)"),

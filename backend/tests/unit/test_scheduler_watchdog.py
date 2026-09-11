@@ -414,6 +414,7 @@ class TestDispatchConfirmationScheduling:
         busy_result.all.return_value = []
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[pending_result, busy_result])
+        db.get = AsyncMock(side_effect=[first, second])
 
         async def slow_confirmation(**_kwargs):
             confirmation_started.set()
@@ -447,6 +448,8 @@ class TestDispatchConfirmationScheduling:
             patch("backend.app.services.print_scheduler.printer_manager.is_connected", return_value=True),
             patch.object(scheduler, "_ams_mapping_uses_compatible_materials", return_value=True),
             patch.object(scheduler, "_block_on_filament_deficit", new=AsyncMock(return_value=False)),
+            patch.object(scheduler, "_claim_for_dispatch", new=AsyncMock(return_value=True)),
+            patch.object(scheduler, "_clear_dispatch_claim", new=AsyncMock()),
             patch.object(scheduler, "_start_print", new=start_print),
         ):
             session_factory.return_value.__aenter__ = AsyncMock(return_value=db)

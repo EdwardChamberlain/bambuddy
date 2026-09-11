@@ -15,6 +15,11 @@ recovery remain durable; cancellation, disconnect, restart, and worker
 failure release the in-memory reservation and leave the item for the normal
 retry/recovery path.
 
+Before source preparation or FTP I/O, each worker claims its queue row in the
+database. Claimed rows cannot be reassigned or selected by another worker;
+cancellation and deletion cancel the matching worker, and a final compare-and-
+set prevents a cancelled or removed row from publishing an MQTT print command.
+
 ## Rollout
 
 1. Leave the setting at `1` after deployment and confirm normal queue dispatch

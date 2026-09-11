@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -245,6 +245,8 @@ class PrintScheduler:
         self._running = True
         logger.info("Print scheduler started")
 
+        await self._clear_stale_dispatch_claims()
+
         while self._running:
             dispatched = False
             try:
@@ -263,6 +265,30 @@ class PrintScheduler:
             if not task.done():
                 task.cancel()
         logger.info("Print scheduler stopped")
+
+    def cancel_inflight(self, item_id: int) -> bool:
+        """Cancel a worker after its queue row has been cancelled or deleted."""
+        entry = self._inflight.get(item_id)
+        if not entry:
+            return False
+        task, _printer_id = entry
+        if task.done():
+            return False
+        task.cancel()
+        return True
+
+    async def _clear_stale_dispatch_claims(self) -> None:
+        """Release claims left by a process that stopped during dispatch."""
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    update(PrintQueueItem).where(PrintQueueItem.dispatching_at.is_not(None)).values(dispatching_at=None)
+                )
+                await db.commit()
+                if result.rowcount:
+                    logger.info("Cleared %d stale queue dispatch claim(s)", result.rowcount)
+        except Exception:
+            logger.exception("Failed to clear stale queue dispatch claims")
 
     async def _recover_stale_dispatches(self, db: AsyncSession) -> None:
         """Reconcile durable dispatches left behind by a restart.
@@ -410,6 +436,7 @@ class PrintScheduler:
                 result = await db.execute(
                     select(PrintQueueItem)
                     .where(PrintQueueItem.status == "pending")
+                    .where(PrintQueueItem.dispatching_at.is_(None))
                     .order_by(
                         PrintQueueItem.printer_id,
                         PrintQueueItem.target_model,
@@ -422,6 +449,7 @@ class PrintScheduler:
                 result = await db.execute(
                     select(PrintQueueItem)
                     .where(PrintQueueItem.status == "pending")
+                    .where(PrintQueueItem.dispatching_at.is_(None))
                     .order_by(PrintQueueItem.printer_id, PrintQueueItem.position)
                 )
             items = list(result.scalars().all())
@@ -910,7 +938,7 @@ class PrintScheduler:
 
             if dispatch_ids:
                 item_printers = {item.id: item.printer_id for item in items}
-                self._launch_uploads(dispatch_ids, item_printers, upload_limit, {item.id: item for item in items})
+                self._launch_uploads(dispatch_ids, item_printers, upload_limit)
                 # Give newly-created workers one turn to acquire their own
                 # sessions and reach the first I/O await. The scheduler still
                 # returns without waiting for uploads to finish.
@@ -928,7 +956,6 @@ class PrintScheduler:
         item_ids: list[int],
         item_printers: dict[int, int | None],
         limit: int,
-        item_snapshots: dict[int, PrintQueueItem] | None = None,
     ) -> None:
         """Launch independent queue workers into the bounded upload pool.
 
@@ -965,16 +992,11 @@ class PrintScheduler:
             return
 
         for item_id in candidates[:free]:
-            snapshot = (item_snapshots or {}).get(item_id)
 
             async def _run_dispatch(
                 selected_item_id: int = item_id,
-                selected_snapshot: PrintQueueItem | None = snapshot,
             ) -> None:
-                if selected_snapshot is None:
-                    await self._dispatch_one(selected_item_id)
-                else:
-                    await self._dispatch_one(selected_item_id, selected_snapshot)
+                await self._dispatch_one(selected_item_id)
 
             task = spawn_background_task(
                 _run_dispatch(),
@@ -991,19 +1013,50 @@ class PrintScheduler:
                 len(candidates) - free,
             )
 
-    async def _dispatch_one(self, item_id: int, fallback_item: PrintQueueItem | None = None) -> None:
+    async def _dispatch_one(self, item_id: int) -> None:
         """Run one upload/dispatch with an isolated session."""
         async with async_session() as item_db:
-            item = await item_db.get(PrintQueueItem, item_id)
-            # The fallback keeps lightweight callers/tests that provide a
-            # session without ORM ``get`` semantics compatible. Production
-            # sessions always return the durable row by id.
-            if not item or not isinstance(getattr(item, "id", None), int):
-                item = fallback_item
-            if not item:
-                logger.info("Queue item %s vanished before dispatch", item_id)
+            if not await self._claim_for_dispatch(item_db, item_id):
+                logger.info(
+                    "Queue item %s is no longer claimable for dispatch; skipping",
+                    item_id,
+                )
                 return
-            await self._start_print(item_db, item)
+            try:
+                item = await item_db.get(PrintQueueItem, item_id)
+                if not item:
+                    logger.info("Queue item %s vanished after dispatch claim", item_id)
+                    return
+                current_task = asyncio.current_task()
+                if current_task is not None and item_id in self._inflight:
+                    # The queue row may have been edited in the tiny window
+                    # between selection and the durable claim. Keep the
+                    # in-memory printer reservation aligned with the row the
+                    # worker actually loaded.
+                    self._inflight[item_id] = (current_task, item.printer_id)
+                await self._start_print(item_db, item)
+            finally:
+                await self._clear_dispatch_claim(item_db, item_id)
+
+    async def _claim_for_dispatch(self, db: AsyncSession, item_id: int) -> bool:
+        """Atomically claim a pending, unclaimed row before dispatch I/O."""
+        result = await db.execute(
+            update(PrintQueueItem)
+            .where(PrintQueueItem.id == item_id)
+            .where(PrintQueueItem.status == "pending")
+            .where(PrintQueueItem.dispatching_at.is_(None))
+            .values(dispatching_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+        return result.rowcount > 0
+
+    async def _clear_dispatch_claim(self, db: AsyncSession, item_id: int) -> None:
+        """Release a worker claim without changing the queue lifecycle state."""
+        try:
+            await db.execute(update(PrintQueueItem).where(PrintQueueItem.id == item_id).values(dispatching_at=None))
+            await db.commit()
+        except Exception:
+            logger.exception("Failed to clear dispatch claim for queue item %s", item_id)
 
     async def _find_idle_printer_for_model(
         self,
@@ -3196,25 +3249,82 @@ class PrintScheduler:
         # Keep the same bounded numeric submission id in the row and MQTT
         # command so a terminal event remains attributable after restart.
         dispatch_subtask_id = str(int(time.time() * 1000) % 2_147_483_647 or 1)
+        now_utc = datetime.now(timezone.utc)
+        claim_timestamp = item.dispatching_at
+        if heat_soak_complete or claim_timestamp is None:
+            # Heat-soak handoffs already reserve the row as ``dispatching``.
+            # The no-claim path preserves direct unit-test callers; normal
+            # scheduler workers always enter through _dispatch_one above.
+            item.status = "dispatching"
+            item.dispatched_at = now_utc
+            item.dispatch_subtask_id = dispatch_subtask_id
+            item.started_at = None
+            item.error_message = None
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                logger.info(
+                    "Queue item %s was not dispatched because printer %s was reserved concurrently",
+                    item.id,
+                    item.printer_id,
+                )
+                return
+        else:
+            try:
+                cas = await db.execute(
+                    update(PrintQueueItem)
+                    .where(PrintQueueItem.id == item.id)
+                    .where(PrintQueueItem.status == "pending")
+                    .where(PrintQueueItem.dispatching_at == claim_timestamp)
+                    .values(
+                        status="dispatching",
+                        dispatched_at=now_utc,
+                        dispatch_subtask_id=dispatch_subtask_id,
+                        started_at=None,
+                        error_message=None,
+                    )
+                )
+                await db.commit()
+            except IntegrityError:
+                # The partial unique index on active printer rows is the
+                # authoritative single-dispatch guard. Another scheduler worker
+                # won the reservation after this worker began its upload; leave
+                # this item pending and never send the command.
+                await db.rollback()
+                logger.info(
+                    "Queue item %s was not dispatched because printer %s was reserved concurrently",
+                    item.id,
+                    item.printer_id,
+                )
+                return
+
+            if cas.rowcount == 0:
+                # Cancellation or deletion won the race while the file was
+                # being uploaded. Never publish MQTT for a row that is no longer ours.
+                logger.info(
+                    "Queue item %s was cancelled or removed during dispatch; cleaning up uploaded file",
+                    item.id,
+                )
+                try:
+                    await delete_file_async(
+                        printer.ip_address,
+                        printer.access_code,
+                        remote_path,
+                        socket_timeout=ftp_timeout,
+                        printer_model=printer.model,
+                    )
+                except Exception as cleanup_err:
+                    logger.debug("Queue item %s: cancelled-dispatch cleanup failed: %s", item.id, cleanup_err)
+                return
+
+        # Keep the ORM object in sync with the durable CAS before the command
+        # boundary and confirmation scheduling below.
         item.status = "dispatching"
-        item.dispatched_at = datetime.now(timezone.utc)
+        item.dispatched_at = now_utc
         item.dispatch_subtask_id = dispatch_subtask_id
         item.started_at = None
         item.error_message = None
-        try:
-            await db.commit()
-        except IntegrityError:
-            # The partial unique index on active printer rows is the
-            # authoritative single-dispatch guard. Another scheduler worker
-            # won the reservation after this worker began its upload; leave
-            # this item pending and never send the command.
-            await db.rollback()
-            logger.info(
-                "Queue item %s was not dispatched because printer %s was reserved concurrently",
-                item.id,
-                item.printer_id,
-            )
-            return
 
         # Register only after the durable reservation succeeded. Otherwise a
         # losing concurrent worker leaves a two-hour expected-print entry that

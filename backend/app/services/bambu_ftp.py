@@ -1160,6 +1160,25 @@ async def upload_file_async(
         fut = loop.run_in_executor(_ftp_executor, lambda: _upload(force_prot_c))
         try:
             return await asyncio.wait_for(asyncio.shield(fut), timeout=deadline)
+        except asyncio.CancelledError:
+            # A scheduler shutdown or queue cancellation cancels the asyncio
+            # wrapper, but shield deliberately leaves the executor future
+            # running. Signal the blocking worker and wait for its client to
+            # disconnect before the logical queue slot is released.
+            cancel.set()
+            logger.info("FTP upload of %s was cancelled; stopping the transfer", remote_path)
+            try:
+                await asyncio.wait_for(asyncio.shield(fut), timeout=_UPLOAD_CANCEL_GRACE)
+            except TimeoutError:
+                logger.error(
+                    "FTP upload thread for %s did not stop within %.0fs of cancellation",
+                    remote_path,
+                    _UPLOAD_CANCEL_GRACE,
+                )
+                fut.add_done_callback(_swallow_future_result)
+            except Exception as e:
+                logger.warning("FTP upload of %s errored while cancelling: %s", remote_path, e)
+            raise
         except TimeoutError:
             cancel.set()
             logger.warning(
