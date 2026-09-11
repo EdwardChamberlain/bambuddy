@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
@@ -89,7 +90,10 @@ describe('PrintModal cross-model mode', () => {
   it('offers filament overrides drawn from every candidate model', async () => {
     renderCrossModel();
 
-    expect(await screen.findByText('Filament Override')).toBeInTheDocument();
+    const filamentRequirements = await screen.findByRole('button', { name: 'Filament Requirements' });
+    await userEvent.click(filamentRequirements);
+    const profile = await screen.findByRole('combobox', { name: /filament profile/i });
+    await userEvent.click(profile);
 
     // PLA Matte is loaded only on the H2D. It has to be offered anyway: the job
     // can land there, and choosing it simply narrows which candidates match.
