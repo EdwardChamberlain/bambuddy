@@ -17,7 +17,6 @@ export default {
     printers: 'Drucker',
     archives: 'Archiv',
     queue: 'Druckwarteschlange',
-    pipelineRuns: 'Pipeline-Läufe',
     stats: 'Statistiken',
     profiles: 'Profile',
     maintenance: 'Wartung',
@@ -1067,8 +1066,16 @@ export default {
     filter: {
       pipeline: 'Pipeline',
       status: 'Status',
+      target: 'Ziel',
       all: 'Alle',
+      allPipelines: 'Alle Pipelines',
+      allStatus: 'Alle Status',
+      allTargets: 'Alle Ziele',
+      clear: 'Filter zurücksetzen',
+      noMatches: 'Keine Läufe entsprechen den aktuellen Filtern.',
     },
+    totalCount_one: '{{n}} Lauf',
+    totalCount_other: '{{n}} Läufe',
     copies: '{{n}} Kopien',
     failedCount: '{{n}} fehlgeschlagen',
     copyN: 'Kopie {{n}}',
@@ -1080,7 +1087,13 @@ export default {
       cancelFailed: 'Abbruch fehlgeschlagen',
       retryStarted: 'Wiederholung gestartet',
       retryFailed: 'Wiederholung fehlgeschlagen',
+      cleared: '{{n}} Läufe gelöscht',
+      clearFailed: 'Löschen fehlgeschlagen',
     },
+    clearLog: 'Verlauf löschen',
+    clearConfirmTitle: 'Verlauf löschen?',
+    clearConfirmBody: 'Jeden abgeschlossenen, fehlgeschlagenen, abgebrochenen und teilweise fehlgeschlagenen Pipeline-Lauf löschen? Laufende Läufe bleiben erhalten. Dies kann nicht rückgängig gemacht werden.',
+    clearConfirmAction: 'Löschen',
     jobStatus: {
       pending: 'ausstehend',
       awaiting_printer: 'wartet auf Drucker',
@@ -1090,6 +1103,7 @@ export default {
       failed: 'fehlgeschlagen',
       cancelled: 'abgebrochen',
     },
+    cancelledByUser: 'Vom Benutzer abgebrochen',
   },
 
   // Queue page
@@ -1171,6 +1185,7 @@ export default {
       queue: 'Warteschlange',
       history: 'Verlauf',
       timeline: 'Zeitachse',
+      pipelines: 'Druckabläufe',
     },
     layout: {
       flatList: 'Liste',
@@ -2669,6 +2684,11 @@ export default {
           round_robin: 'Reihum — durch geeignete Drucker rotieren',
           fill_one_first: 'Erst einen füllen — alle Kopien an einen Drucker binden',
         },
+        fanoutShort: {
+          max_parallel: 'parallel',
+          round_robin: 'Reihum',
+          fill_one_first: 'einer zuerst',
+        },
       },
       action: {
         save: 'Speichern',
@@ -2681,7 +2701,21 @@ export default {
         process: 'Prozess',
         filament: 'Filament',
         filamentN: 'Filament {{n}}',
+        filamentAll: 'Alle {{n}} Slots',
         bed: 'Druckplatte',
+      },
+      group: {
+        profiles: 'Profile',
+        filaments: 'Filamente',
+      },
+      searchPlaceholder: 'Pipelines durchsuchen…',
+      filterTargetType: 'Nach Zielart filtern',
+      filterTarget: 'Nach Ziel filtern',
+      filter: {
+        all: 'Alle Ziele',
+        noTarget: 'Kein Ziel festgelegt',
+        count: '{{shown}} / {{total}}',
+        noMatches: 'Keine Pipelines entsprechen den aktuellen Filtern.',
       },
       toast: {
         saved: 'Pipeline gespeichert',
