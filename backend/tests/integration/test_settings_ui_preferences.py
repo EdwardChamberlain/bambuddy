@@ -33,6 +33,7 @@ _SENSITIVE_KEYS = {
     "prometheus_token",
     "virtual_printer_access_code",
     "ldap_bind_password",
+    "obico_ml_token",
     "ldap_bind_dn",
     "ldap_server_url",
     "external_url",

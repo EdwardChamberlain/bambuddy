@@ -236,15 +236,15 @@ class SmartPlugManager:
             return
 
         for plug in plugs:
+            # Cancel any pending off task before checking enabled: a re-print
+            # must abort a scheduled auto-off even if the user disabled the
+            # plug after the task was scheduled. Otherwise that stale task can
+            # still cut power during the new print (#1890).
+            self._cancel_pending_off(plug.id)
+
             if not plug.enabled:
                 logger.debug("Smart plug '%s' is disabled, skipping auto-on", plug.name)
                 continue
-
-            # Cancel any pending off task FIRST — a re-print must abort a
-            # scheduled auto-off regardless of the plug's auto_on setting
-            # (#1890). Previously this lived behind the auto_on gate, so a plug
-            # with auto_on disabled kept its pending off and cut power mid-print.
-            self._cancel_pending_off(plug.id)
 
             if not plug.auto_on:
                 logger.debug("Smart plug '%s' auto_on is disabled", plug.name)

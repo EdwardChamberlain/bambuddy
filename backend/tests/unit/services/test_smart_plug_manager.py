@@ -1052,6 +1052,21 @@ class TestActivePrintGuard:
             assert mock_plug.id not in manager._pending_off
             mock_tasmota.turn_on.assert_not_called()  # but not powered on
 
+    @pytest.mark.asyncio
+    async def test_reprint_cancels_pending_off_even_when_plug_disabled(self, manager, mock_plug):
+        """Disabling a plug after scheduling must not leave a stale off task."""
+        mock_plug.enabled = False
+        mock_task = MagicMock()
+        manager._pending_off[mock_plug.id] = mock_task
+        with (
+            patch.object(manager, "_get_plugs_for_printer", new_callable=AsyncMock, return_value=[mock_plug]),
+            patch.object(manager, "_mark_auto_off_pending", new_callable=AsyncMock),
+        ):
+            await manager.on_print_start(printer_id=1, db=AsyncMock())
+
+        mock_task.cancel.assert_called_once()
+        assert mock_plug.id not in manager._pending_off
+
 
 class TestAccessoryPlugDoesNotMarkPrinterOffline:
     """#2629 — a plug linked to a printer is not necessarily its power supply.
