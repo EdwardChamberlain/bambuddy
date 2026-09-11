@@ -2,11 +2,13 @@
 
 import json
 import logging
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import defusedxml.ElementTree as ET
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, inspect, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -34,6 +36,7 @@ from backend.app.schemas.print_queue import (
     PrintQueueItemUpdate,
     PrintQueueReorder,
     QueueVariantCreate,
+    QueueVariantSummary,
 )
 from backend.app.services.chamber_heat_soak import abort_heat_soak, lock_queue_item, skip_heat_soak
 from backend.app.services.filament_deficit import compute_deficit_for_queue_item
@@ -53,6 +56,88 @@ from backend.app.utils.threemf_tools import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/queue", tags=["queue"])
+
+
+def _variant_summaries(item: PrintQueueItem) -> list[QueueVariantSummary]:
+    """Cross-model candidates for display (#671), or [] if they weren't loaded.
+
+    Every route that builds a queue response eager-loads ``variants``. Reading
+    the attribute unguarded would still be a landmine for the next one that
+    doesn't: a lazy load on an async session raises rather than degrading, so a
+    forgotten ``selectinload`` would turn a card render into a 500.
+    """
+    if "variants" in inspect(item).unloaded:
+        return []
+    return [
+        QueueVariantSummary(
+            library_file_id=v.library_file_id,
+            filename=v.library_file.filename if v.library_file else "",
+            target_model=v.target_model,
+            position=v.position,
+        )
+        for v in item.variants
+    ]
+
+
+def _extract_filament_types_from_3mf(file_path: Path, plate_id: int | None = None) -> list[str]:
+    """Extract unique filament types from a 3MF file.
+
+    Args:
+        file_path: Path to the 3MF file
+        plate_id: Optional plate index to filter for (for multi-plate files)
+
+    Returns:
+        List of unique filament types (e.g., ["PLA", "PETG"])
+    """
+    types: set[str] = set()
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            if "Metadata/slice_info.config" not in zf.namelist():
+                return []
+
+            content = zf.read("Metadata/slice_info.config").decode()
+            root = ET.fromstring(content)
+
+            if plate_id is not None:
+                # Find the plate element with matching index
+                for plate_elem in root.findall(".//plate"):
+                    plate_index = None
+                    for meta in plate_elem.findall("metadata"):
+                        if meta.get("key") == "index":
+                            try:
+                                plate_index = int(meta.get("value", "0"))
+                            except ValueError:
+                                pass  # Skip plate with unparseable index
+                            break
+
+                    if plate_index == plate_id:
+                        for filament_elem in plate_elem.findall("filament"):
+                            filament_type = filament_elem.get("type", "")
+                            used_g = filament_elem.get("used_g", "0")
+                            try:
+                                used_grams = float(used_g)
+                            except (ValueError, TypeError):
+                                used_grams = 0
+                            if used_grams > 0 and filament_type:
+                                types.add(filament_type)
+                        break
+            else:
+                # No plate_id specified - extract all filaments with used_g > 0
+                for filament_elem in root.findall(".//filament"):
+                    filament_type = filament_elem.get("type", "")
+                    used_g = filament_elem.get("used_g", "0")
+                    try:
+                        used_grams = float(used_g)
+                    except (ValueError, TypeError):
+                        used_grams = 0
+                    if used_grams > 0 and filament_type:
+                        types.add(filament_type)
+
+    except Exception as e:
+        logger.warning("Failed to extract filament types from %s: %s", file_path, e)
+
+    return sorted(types)
 
 
 # Local alias kept so existing call sites stay compact; the implementation lives
@@ -158,6 +243,12 @@ def _enrich_response(item: PrintQueueItem) -> PrintQueueItemResponse:
         "nozzle_mapping": nozzle_mapping_parsed,
         "nozzles_info": nozzles_info_parsed,
         "cleanup_library_after_dispatch": item.cleanup_library_after_dispatch,
+        # Cross-model alternatives (#671). Guarded rather than read directly:
+        # every route that reaches here eager-loads the relationship, but a
+        # caller that forgets would trigger a lazy load, and a lazy load on an
+        # async session raises rather than degrading. An empty list is the
+        # correct answer for the ordinary item this would most likely be.
+        "variants": _variant_summaries(item),
     }
     response = PrintQueueItemResponse(**item_dict)
     if item.archive:
@@ -257,6 +348,8 @@ async def list_queue(
             selectinload(PrintQueueItem.library_file),
             selectinload(PrintQueueItem.created_by),
             selectinload(PrintQueueItem.batch),
+            # Cross-model candidates (#671) and their files, for the card label.
+            selectinload(PrintQueueItem.variants).selectinload(PrintQueueVariant.library_file),
         )
         .order_by(PrintQueueItem.printer_id.nulls_first(), PrintQueueItem.position)
     )
@@ -1195,6 +1288,8 @@ async def get_queue_item(
             selectinload(PrintQueueItem.library_file),
             selectinload(PrintQueueItem.created_by),
             selectinload(PrintQueueItem.batch),
+            # Cross-model candidates (#671) and their files, for the card label.
+            selectinload(PrintQueueItem.variants).selectinload(PrintQueueVariant.library_file),
         )
         .where(PrintQueueItem.id == item_id)
     )
@@ -1700,6 +1795,7 @@ async def start_queue_item(
             selectinload(PrintQueueItem.printer),
             selectinload(PrintQueueItem.library_file),
             selectinload(PrintQueueItem.batch),
+            selectinload(PrintQueueItem.variants).selectinload(PrintQueueVariant.library_file),
         )
         .where(PrintQueueItem.id == item_id)
     )
