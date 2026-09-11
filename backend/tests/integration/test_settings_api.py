@@ -476,6 +476,16 @@ class TestSettingsAPI:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_default_print_options_unknown_integer_rejected(self, async_client: AsyncClient):
+        """Only the legacy 0/1 values and the tri-state 2 are accepted."""
+        response = await async_client.put(
+            "/api/v1/settings/",
+            json={"default_bed_levelling": 99},
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_default_print_options_persist(self, async_client: AsyncClient):
         """CRITICAL: Verify default print options persist after update."""
         await async_client.put(

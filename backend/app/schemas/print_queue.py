@@ -47,7 +47,7 @@ def _coerce_tristate(v: object) -> object:
     if isinstance(v, bool):
         return "on" if v else "off"
     if isinstance(v, int):
-        return {0: "off", 1: "on", 2: "auto"}.get(v, "auto")
+        return {0: "off", 1: "on", 2: "auto"}.get(v, v)
     if isinstance(v, str):
         low = v.strip().lower()
         if low in ("true", "1"):

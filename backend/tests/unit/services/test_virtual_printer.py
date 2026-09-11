@@ -828,7 +828,8 @@ class TestVirtualPrinterInstance:
         slicer toggle reach the queue item.
 
         Settings here have timelapse OFF; the slicer's MQTT capture has it ON.
-        After the fix the queue item must reflect the slicer's choice.
+        The queue item must reflect that boolean choice, while calibration
+        modes continue to come from Grove settings.
         """
         from backend.app.services.virtual_printer.manager import VirtualPrinterInstance
 
@@ -904,18 +905,19 @@ class TestVirtualPrinterInstance:
         assert len(added_items) == 1
         queue_item = added_items[0]
         assert queue_item.timelapse is True, "Slicer's timelapse=True must override settings.default_timelapse=False"
-        assert queue_item.bed_levelling == "off", "Slicer's bed_leveling=False must override default_bed_levelling"
-        assert queue_item.flow_cali == "on"
+        assert queue_item.bed_levelling == "on", "Slicer calibration metadata must not override Grove defaults"
+        assert queue_item.flow_cali == "off"
         assert queue_item.vibration_cali is False
         assert queue_item.layer_inspect is True
         # Capture is consumed — no lingering state for the next print of the same name.
         assert file_path.name not in inst._slicer_print_options
 
     @pytest.mark.asyncio
-    async def test_add_to_print_queue_coerces_slicer_integer_zero_one(self, tmp_path):
-        """#1403: H-family firmwares carry calibration flags as integers
-        (0/1) rather than booleans. The capture must coerce both shapes so
-        H-family-sliced jobs through the VP queue work the same as P1/X1.
+    async def test_add_to_print_queue_ignores_slicer_calibration_flags(self, tmp_path):
+        """Calibration flags from the slicer do not encode Grove's Auto state.
+
+        The VP queue must use the Grove workflow defaults instead of treating
+        slicer booleans or integer companions as tri-state values.
         """
         from backend.app.services.virtual_printer.manager import VirtualPrinterInstance
 
@@ -970,14 +972,15 @@ class TestVirtualPrinterInstance:
         assert len(added_items) == 1
         queue_item = added_items[0]
         assert queue_item.timelapse is True, "integer 1 must coerce to True"
-        assert queue_item.bed_levelling == "off", "integer 0 must coerce to off"
-        assert queue_item.flow_cali == "on"
+        assert queue_item.bed_levelling == "auto"
+        assert queue_item.flow_cali == "auto"
 
     @pytest.mark.asyncio
-    async def test_add_to_print_queue_captures_slicer_auto_from_int_companion(self, tmp_path):
-        """The slicer's tri-state rides on the int companion (auto_bed_leveling /
-        extrude_cali_flag). When the slicer picks "Auto" it sends bed_leveling
-        false + auto_bed_leveling 2; the VP must record "auto", not "off".
+    async def test_add_to_print_queue_ignores_slicer_calibration_mode_metadata(self, tmp_path):
+        """The slicer does not encode Grove's machine-managed Auto state.
+
+        Its boolean fields and companion integers must not override the Grove
+        workflow defaults, including when the companion happens to be 2.
         """
         from backend.app.services.virtual_printer.manager import VirtualPrinterInstance
 
@@ -1021,11 +1024,16 @@ class TestVirtualPrinterInstance:
         mock_archive.id = 1
         mock_archive.print_name = "test"
 
+        async def fake_get_setting(_db, key):
+            return {
+                "default_bed_levelling": "false",
+                "default_flow_cali": "true",
+            }.get(key)
+
         with (
             patch(
                 "backend.app.api.routes.settings.get_setting",
-                new_callable=AsyncMock,
-                return_value=None,
+                new=fake_get_setting,
             ),
             patch(
                 "backend.app.services.archive.ArchiveService.archive_print",
@@ -1037,8 +1045,8 @@ class TestVirtualPrinterInstance:
 
         assert len(added_items) == 1
         queue_item = added_items[0]
-        assert queue_item.bed_levelling == "auto", "auto_bed_leveling=2 must record 'auto'"
-        assert queue_item.flow_cali == "auto", "extrude_cali_flag=2 must record 'auto'"
+        assert queue_item.bed_levelling == "off", "Grove default must win over slicer calibration metadata"
+        assert queue_item.flow_cali == "on"
 
     @pytest.mark.asyncio
     async def test_add_to_print_queue_populates_required_filament_types(self, tmp_path):
@@ -1974,7 +1982,7 @@ class TestVirtualPrinterInstance:
         params = dict(compiled.params)
         assert _json.loads(params["nozzle_mapping"]) == [16, -1, -1, 1]
         assert params["timelapse"] is True
-        assert params["bed_levelling"] == "off"  # MQTT bed_leveling → column bed_levelling (tri-state)
+        assert "bed_levelling" not in params  # Slicer calibration metadata is intentionally ignored
         # Recent-queue tracking dict is cleared after the patch.
         assert file_path.name not in inst._recent_queue_items
 
@@ -3845,8 +3853,8 @@ class TestVPProjectFileStashKey:
     (with extension). `_add_to_print_queue` looks up the stash under
     `file_path.name` from the FTP receive side, which always has the
     extension. If the stash uses `subtask_name`, lookup misses → every
-    captured slicer field (bed_leveling, flow_cali, vibration_cali,
-    layer_inspect, timelapse, nozzle_mapping) silently falls back to
+    captured slicer field (vibration_cali, layer_inspect, timelapse,
+    nozzle_mapping) silently falls back to
     settings defaults on every Bambu Studio "Send" upload.
 
     `filename` (subtask_name) must still flow to `_schedule_finish_release`
