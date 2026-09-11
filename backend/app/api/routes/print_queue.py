@@ -1321,6 +1321,15 @@ async def update_queue_item(
     user, can_modify_all = auth_result
 
     item = await lock_queue_item(db, item_id)
+    if item:
+        # Keep the write lock from above while eager-loading candidates for the
+        # edit guard and response payload.
+        result = await db.execute(
+            select(PrintQueueItem)
+            .options(selectinload(PrintQueueItem.variants).selectinload(PrintQueueVariant.library_file))
+            .where(PrintQueueItem.id == item_id)
+        )
+        item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(404, "Queue item not found")
 
@@ -1341,6 +1350,24 @@ async def update_queue_item(
     # code map has to run first).
     if "target_model" in update_data and update_data["target_model"]:
         update_data["target_model"] = normalize_model_name(update_data["target_model"])
+
+    # A cross-model item (#671) owns its own printer decision: each candidate
+    # carries its model, and the resolver folds the winner onto the row at
+    # dispatch. Assigning a printer here would leave a row with variants *and* a
+    # printer_id, and the fixed-printer branch of the scheduler wins that race —
+    # so it would dispatch a row whose library_file_id is still null and die in
+    # the upload. Narrowing target_model is refused for the same reason: it
+    # would silently discard every alternative the user queued.
+    #
+    # Compared against the current value rather than merely present, because the
+    # edit dialog re-sends target_model unchanged on every save.
+    if item.variants:
+        for field in ("printer_id", "target_model"):
+            if field in update_data and update_data[field] != getattr(item, field):
+                raise HTTPException(
+                    400,
+                    "This job has printer alternatives — remove them before assigning a printer or model",
+                )
 
     # Cannot specify both printer_id and target_model
     new_printer_id = update_data.get("printer_id", item.printer_id)

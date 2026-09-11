@@ -46,6 +46,7 @@ export default {
 
   // Common
   common: {
+    plusNMore: '他{{count}}件',
     save: '保存',
     saving: '保存中...',
     cancel: 'キャンセル',
@@ -4577,6 +4578,7 @@ export default {
   // Print modal
   printModal: {
     variants: {
+      editNote: 'これらの候補はキュー追加時に決まります。変更するにはキャンセルして追加し直してください。',
       title: 'プリンターの候補',
       help: '1つのジョブ、キューは1枠。条件に合う最初に空いたプリンターがそのファイルを印刷します。',
       unknownModel: '不明なモデル',
