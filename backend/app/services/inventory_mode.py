@@ -33,10 +33,10 @@ async def spoolman_owns_assignments(db: AsyncSession) -> bool:
     tray were unassigned.
     """
     try:
-        from backend.app.api.routes.settings import get_setting
+        from backend.app.api.routes.settings import get_setting, setting_is_true
 
         value = await get_setting(db, "spoolman_enabled")
-        return bool(value) and value.lower() == "true"
+        return setting_is_true(value)
     except Exception as exc:  # noqa: BLE001 — a mode probe must not raise into its callers
         logger.debug("Could not read spoolman_enabled, assuming built-in inventory: %s", exc)
         return False

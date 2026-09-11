@@ -53,6 +53,16 @@ async def _run_ams_change(printer_id: int, ams_data: list):
 
 class TestAutoUnlinkRespectsTheActiveMode:
     @pytest.mark.asyncio
+    async def test_mode_probe_accepts_legacy_boolean_value(self):
+        from backend.app.services.inventory_mode import spoolman_owns_assignments
+
+        with patch(
+            "backend.app.api.routes.settings.get_setting",
+            new=AsyncMock(return_value=True),
+        ):
+            assert await spoolman_owns_assignments(MagicMock()) is True
+
+    @pytest.mark.asyncio
     @pytest.mark.integration
     async def test_spoolman_mode_does_not_unlink_built_in_assignments(
         self, async_client: AsyncClient, printer_factory, db_session: AsyncSession
