@@ -3518,6 +3518,18 @@ async def _run_slicer_with_fallback(
         primary_bytes = _sanitize_project_settings_sentinels(primary_bytes)
 
     used_embedded_settings = False
+    # "Slice as designed": for a project 3MF, let the slicer use the
+    # file's embedded project settings instead of applying the selected
+    # profile triplet. This is deliberately opt-in and ignored for STL/plain
+    # model uploads, which do not contain a project settings tree.
+    embedded_mode = bool(request.use_embedded_settings and is_3mf)
+    if request.process_overrides and not embedded_mode:
+        from backend.app.services.process_overrides import apply_process_overrides
+
+        # Explicit modal edits win over the selected preset and any source
+        # metadata patches. Embedded-settings mode deliberately skips this
+        # profile path so the designer's settings remain authoritative.
+        presets["process"] = apply_process_overrides(presets["process"], request.process_overrides)
     service = SlicerApiService(api_url, timeout_seconds=await get_stall_timeout_seconds(db))
 
     # #1493: cross-nozzle-class re-slice (single <-> dual). Without
@@ -3535,6 +3547,8 @@ async def _run_slicer_with_fallback(
     # orthogonal so this decision doesn't interact with the #1337 build-
     # plate override.
     cross_class_arrange = False
+    source_model: str | None = None
+    target_model: str | None = None
     if is_3mf:
         from backend.app.services.slicer_3mf_convert import (
             extract_source_printer_model,
@@ -3543,6 +3557,14 @@ async def _run_slicer_with_fallback(
 
         source_model = extract_source_printer_model(primary_bytes)
         target_model = await _resolve_target_printer_model(db, user, request)
+        if embedded_mode and (not source_model or not target_model or source_model != target_model):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Embedded settings can only be used when the source 3MF's printer "
+                    "matches the selected target printer."
+                ),
+            )
         if source_model and target_model and is_dual_nozzle_model(source_model) != is_dual_nozzle_model(target_model):
             logger.info(
                 "Cross-nozzle-class re-slice (%s -> %s): enabling --arrange so BS reconciles "
@@ -3551,6 +3573,12 @@ async def _run_slicer_with_fallback(
                 target_model,
             )
             cross_class_arrange = True
+
+    # User-requested layout passes are additive with the safety arrange that
+    # cross-nozzle-class re-slices require. An unchecked box must not disable
+    # that safety path; the slicer sidecar receives only enabled flags.
+    arrange_flag = cross_class_arrange or request.auto_arrange
+    orient_flag = request.auto_orient
     # When this slice is dispatcher-tracked, generate a request_id so
     # the sidecar publishes progress under it, and wire a callback that
     # forwards each frame onto SliceDispatchService.set_progress for the
@@ -3579,10 +3607,11 @@ async def _run_slicer_with_fallback(
     # with printer …" (#2628). Replace unused-slot entries with the
     # plate's lowest used slot before the real slice so the loaded set is
     # materially homogeneous and printer-correct.
-    if is_3mf and request.plate is not None:
+    if is_3mf:
         from backend.app.services.slicer_3mf_convert import substitute_unused_plate_filaments
 
-        filament_jsons = substitute_unused_plate_filaments(primary_bytes, request.plate, filament_jsons)
+        if request.plate is not None and request.plate != 0:
+            filament_jsons = substitute_unused_plate_filaments(primary_bytes, request.plate, filament_jsons)
 
     # Cross-class slice-all loop (#1493): when the user asks for
     # ``plate=0`` (all plates) AND the source's nozzle class differs from
@@ -3594,11 +3623,14 @@ async def _run_slicer_with_fallback(
     # and merge the per-plate outputs into one multi-plate 3MF instead.
     # Same-class slice-all goes through the regular path below — the
     # sidecar's native ``--slice 0`` produces the right shape directly.
-    use_cross_class_slice_all = cross_class_arrange and request.plate == 0 and request.export_3mf
+    # ``--arrange`` is project-wide in the sidecar, so both the cross-class
+    # safety path and a user's all-plates arrange request must slice each
+    # plate separately before merging the results.
+    use_arrange_slice_all = is_3mf and arrange_flag and request.plate == 0 and request.export_3mf
 
     try:
         try:
-            if use_cross_class_slice_all:
+            if use_arrange_slice_all:
                 from backend.app.services.slicer_3mf_convert import (
                     count_plates_in_3mf,
                     merge_plate_3mfs,
@@ -3645,18 +3677,36 @@ async def _run_slicer_with_fallback(
 
                 for plate_num in range(1, plate_count + 1):
                     plate_cb = _wrap_progress_for_plate(plate_num, plate_count)
-                    per_plate = await service.slice_with_profiles(
-                        model_bytes=primary_bytes,
-                        model_filename=model_filename,
-                        printer_profile_json=presets["printer"],
-                        process_profile_json=presets["process"],
-                        filament_profile_jsons=filament_jsons,
-                        plate=plate_num,
-                        export_3mf=True,
-                        arrange=True,
-                        request_id=progress_request_id,
-                        on_progress=plate_cb,
-                    )
+                    if embedded_mode:
+                        per_plate = await service.slice_without_profiles(
+                            model_bytes=primary_bytes,
+                            model_filename=model_filename,
+                            plate=plate_num,
+                            export_3mf=True,
+                            arrange=True,
+                            orient=orient_flag,
+                            request_id=progress_request_id,
+                            on_progress=plate_cb,
+                        )
+                    else:
+                        plate_filament_jsons = substitute_unused_plate_filaments(
+                            primary_bytes,
+                            plate_num,
+                            filament_jsons,
+                        )
+                        per_plate = await service.slice_with_profiles(
+                            model_bytes=primary_bytes,
+                            model_filename=model_filename,
+                            printer_profile_json=presets["printer"],
+                            process_profile_json=presets["process"],
+                            filament_profile_jsons=plate_filament_jsons,
+                            plate=plate_num,
+                            export_3mf=True,
+                            arrange=True,
+                            orient=orient_flag,
+                            request_id=progress_request_id,
+                            on_progress=plate_cb,
+                        )
                     per_plate_results.append((plate_num, per_plate))
 
                 # Merge the N single-plate 3MFs into one multi-plate 3MF.
@@ -3677,6 +3727,23 @@ async def _run_slicer_with_fallback(
                     filament_used_g=sum(r.filament_used_g for _, r in per_plate_results),
                     filament_used_mm=sum(r.filament_used_mm for _, r in per_plate_results),
                 )
+                used_embedded_settings = embedded_mode
+            elif embedded_mode:
+                # No --load-settings: the 3MF's own project_settings.config
+                # supplies the designer's walls, infill and other parameters.
+                # Arrange/orient remain available because they are geometry
+                # actions, independent of where the print settings came from.
+                result = await service.slice_without_profiles(
+                    model_bytes=primary_bytes,
+                    model_filename=model_filename,
+                    plate=request.plate,
+                    export_3mf=request.export_3mf,
+                    arrange=arrange_flag,
+                    orient=orient_flag,
+                    request_id=progress_request_id,
+                    on_progress=progress_callback,
+                )
+                used_embedded_settings = True
             else:
                 result = await service.slice_with_profiles(
                     model_bytes=primary_bytes,
@@ -3686,7 +3753,8 @@ async def _run_slicer_with_fallback(
                     filament_profile_jsons=filament_jsons,
                     plate=request.plate,
                     export_3mf=request.export_3mf,
-                    arrange=cross_class_arrange,
+                    arrange=arrange_flag,
+                    orient=orient_flag,
                     request_id=progress_request_id,
                     on_progress=progress_callback,
                 )
@@ -3705,7 +3773,13 @@ async def _run_slicer_with_fallback(
                 # (e.g. re-slicing an H2D model for an X1C: the object is off
                 # the smaller bed). Surface the slicer's reason instead.
                 raise HTTPException(status_code=400, detail=rejection) from exc
-            if not is_3mf:
+            if not is_3mf or embedded_mode or use_arrange_slice_all or request.process_overrides:
+                # There is no alternate settings source for STL, an embedded
+                # slice already used the only available settings, and an
+                # arranged slice-all cannot safely retry as a single --slice 0
+                # request because that changes the number of output plates.
+                # Explicit process overrides also cannot be represented on a
+                # profile-less retry; fail instead of silently dropping them.
                 raise
             logger.warning(
                 "Slicer CLI failed on the --load-settings path for %s (%s); retrying with embedded settings",
@@ -3725,6 +3799,8 @@ async def _run_slicer_with_fallback(
                 model_filename=model_filename,
                 plate=request.plate,
                 export_3mf=request.export_3mf,
+                arrange=arrange_flag,
+                orient=orient_flag,
                 request_id=progress_request_id,
                 on_progress=progress_callback,
             )

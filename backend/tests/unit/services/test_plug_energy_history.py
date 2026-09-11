@@ -81,11 +81,13 @@ async def test_yesterday_is_none_until_two_midnights_have_passed(db_session):
 
 async def test_nothing_derivable_before_the_first_midnight(db_session):
     plug = await _plug(db_session)
-    now = datetime.now(timezone.utc)
+    # Keep the snapshot explicitly after local midnight so this remains true
+    # when the suite runs around the Europe/Berlin day boundary.
+    now = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
     # Snapshot taken this morning, after midnight — no baseline for the day.
     await _snapshot(db_session, plug.id, now - timedelta(minutes=30), 102.0)
 
-    today, yesterday = await derive_today_yesterday(db_session, plug.id, live_total_kwh=103.5)
+    today, yesterday = await derive_today_yesterday(db_session, plug.id, live_total_kwh=103.5, now_utc=now)
 
     assert today is None
     assert yesterday is None

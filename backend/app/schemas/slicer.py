@@ -1,6 +1,6 @@
 """Pydantic schemas for slice requests."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -91,6 +91,30 @@ class SliceRequest(BaseModel):
             "'High Temp Plate', 'Textured PEI Plate', 'Smooth PEI Plate', "
             "'Cool Plate (SuperTack)', 'Supertack Plate'. None ⇒ inherit from the "
             "process preset unchanged (#1337)."
+        ),
+    )
+    auto_orient: bool = Field(
+        default=False,
+        description="Run the slicer's auto-orientation pass before slicing.",
+    )
+    auto_arrange: bool = Field(
+        default=False,
+        description="Run the slicer's auto-arrangement pass before slicing.",
+    )
+    use_embedded_settings: bool = Field(
+        default=False,
+        description=(
+            "For project 3MF files, slice with the file's embedded settings "
+            "instead of the selected profile triplet. Ignored for plain model "
+            "uploads; preset references remain required for compatibility."
+        ),
+    )
+    process_overrides: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Sparse edits for supported slicer process settings. Values are "
+            "applied after the selected process profile and ignored when "
+            "use_embedded_settings is enabled."
         ),
     )
 
