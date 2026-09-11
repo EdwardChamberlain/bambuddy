@@ -17,6 +17,7 @@ export default {
     printers: 'Printers',
     archives: 'Archives',
     queue: 'Print Queue',
+    pipelineRuns: 'Pipeline Runs',
     stats: 'Statistics',
     profiles: 'Profiles',
     maintenance: 'Maintenance',
@@ -114,6 +115,8 @@ export default {
     now: 'Now',
     collapse: 'Collapse',
     expand: 'Expand',
+    previous: 'Previous',
+    next: 'Next',
     viewArchive: 'View archive',
     viewInFileManager: 'View in File Manager',
     addedBy: 'Added by {{username}}',
@@ -1045,6 +1048,65 @@ export default {
         cancelled: 'Cancelled',
         skipped: 'Skipped',
       },
+    },
+  },
+
+  // Sticky upload-progress toast (#1625 follow-up — restored the
+  // legacy bg-dispatch toast UI for the scheduler-driven dispatch path).
+  // Strings mirror 0b43ac0d's backgroundDispatch namespace.
+  dispatchToast: {
+    untitled: 'Print job',
+    startingPrints: 'Starting prints',
+    progressSummary: '{{complete}}/{{total}} complete • Processing: {{processing}}',
+    expandDetails: 'Expand dispatch details',
+    collapseDetails: 'Collapse dispatch details',
+    awaitingPrinter: 'Awaiting printer…',
+    status: {
+      processing: 'Processing',
+      completed: 'Completed',
+      failed: 'Failed',
+    },
+    failed: {
+      generic: 'Dispatch failed',
+      upload_failed: 'Upload to printer failed',
+      start_command_failed: 'Printer rejected start command',
+    },
+    dismiss: 'Dismiss',
+  },
+
+  // Pipeline Runs dashboard (#1425 PR C). Lists every Slicer Pipeline run
+  // across every pipeline with status + pipeline filters and pagination.
+  // Each row expands to per-copy job status; partial-failure runs get a
+  // Retry-failed button; in-flight runs get a Cancel button.
+  pipelineRuns: {
+    title: 'Pipeline Runs',
+    loading: 'Loading…',
+    empty: 'No pipeline runs yet.',
+    filter: {
+      pipeline: 'Pipeline',
+      status: 'Status',
+      all: 'All',
+    },
+    copies: '{{n}} copies',
+    failedCount: '{{n}} failed',
+    copyN: 'Copy {{n}}',
+    retryFailed: 'Retry failed',
+    retryOf: 'retry of #{{n}}',
+    pagination: '{{start}}–{{end}} of {{total}}',
+    toast: {
+      cancelled: 'Run cancelled',
+      cancelFailed: 'Cancel failed',
+      retryStarted: 'Retry started',
+      retryFailed: 'Retry failed',
+    },
+    jobStatus: {
+      pending: 'pending',
+      awaiting_printer: 'awaiting printer',
+      queued: 'queued',
+      printing: 'printing',
+      completed: 'completed',
+      failed: 'failed',
+      cancelled: 'cancelled',
     },
   },
 
@@ -2601,6 +2663,15 @@ export default {
       migrationErrorWarning: '{{count}} legacy row(s) failed to re-encrypt at startup. Check server logs and restart Grove Control to retry.',
     },
 
+    // Slicer Pipeline limits (#1425 PR C). Admin-tunable cap that constrains
+    // the copies input in the Run-with-pipeline modal. Lives on the Workflow
+    // tab's Queue & Dispatch sub-tab.
+    pipelineLimits: {
+      title: 'Slicer Pipeline limits',
+      maxCopiesLabel: 'Max copies per run',
+      maxCopiesDesc: 'Upper bound on the copies operators can request when running a pipeline. Server-side hard cap is 1000.',
+    },
+
     // Slicer Pipelines (#1425): list/edit/delete preset bundles users saved
     // from the Slice dialog. Lives in Settings → Workflow → Pipelines sub-tab.
     pipelines: {
@@ -2619,6 +2690,17 @@ export default {
         description: 'Description',
         targetPrinter: 'Target printer',
         noTarget: '— No target —',
+        // PR C
+        targetKind: 'Target type',
+        targetKindSpecific: 'Specific printer',
+        targetKindClass: 'Printer class',
+        targetModelClass: 'Printer model',
+        fanoutStrategy: 'Fanout strategy',
+        fanout: {
+          max_parallel: 'Max parallel — distribute across any idle matching printer',
+          round_robin: 'Round robin — cycle through eligible printers',
+          fill_one_first: 'Fill one first — pin all copies to one printer',
+        },
       },
       action: {
         save: 'Save',
@@ -2651,6 +2733,7 @@ export default {
           in_progress: 'printing',
           completed: 'completed',
           failed: 'failed',
+          partial_failure: 'partial failure',
           cancelled: 'cancelled',
         },
       },
@@ -3893,6 +3976,10 @@ export default {
       empty: 'No pipelines saved yet. Open the Slice dialog and click "Save as pipeline" to create one.',
       noTarget: 'No target printer set',
       noTargetMessage: 'This pipeline has no target printer set. Open it in Settings to pick one.',
+      // PR C — copies input + class-targeted pipelines.
+      copies: 'Copies',
+      copiesHint: 'max {{n}}',
+      classTarget: 'Any {{model}}',
       toast: {
         started: 'Pipeline run started',
         failed: 'Could not start run',
@@ -3906,6 +3993,9 @@ export default {
         filamentColor: 'Filament slot {{slot}}: colour differs (expected {{expected}}, AMS has {{actual}})',
         amsSlotMissing: 'AMS slot {{slot}} not available on this printer',
         filamentUnverified: 'Filament slot {{slot}} comes from a cloud / standard preset and could not be statically verified.',
+        // PR C — class targeting
+        noClassMatches: 'No printers in this install match the pipeline\'s target model class ({{expected}}).',
+        classNotSet: 'Pipeline target is set to a printer class but no model was chosen.',
       },
     },
   },
