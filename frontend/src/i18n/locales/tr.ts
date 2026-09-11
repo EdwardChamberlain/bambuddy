@@ -17,7 +17,6 @@ export default {
     printers: 'Yazıcılar',
     archives: 'Arşivler',
     queue: 'Baskı Kuyruğu',
-    pipelineRuns: 'Pipeline çalıştırmaları',
     stats: 'İstatistikler',
     profiles: 'Profiller',
     maintenance: 'Bakım',
@@ -1047,8 +1046,16 @@ export default {
     filter: {
       pipeline: 'Pipeline',
       status: 'Durum',
+      target: 'Hedef',
       all: 'Tümü',
+      allPipelines: 'Tüm pipeline\'lar',
+      allStatus: 'Tüm durumlar',
+      allTargets: 'Tüm hedefler',
+      clear: 'Filtreleri temizle',
+      noMatches: 'Mevcut filtrelere uyan çalıştırma yok.',
     },
+    totalCount_one: '{{n}} çalıştırma',
+    totalCount_other: '{{n}} çalıştırma',
     copies: '{{n}} kopya',
     failedCount: '{{n}} başarısız',
     copyN: 'Kopya {{n}}',
@@ -1060,7 +1067,13 @@ export default {
       cancelFailed: 'İptal başarısız',
       retryStarted: 'Yeniden deneme başlatıldı',
       retryFailed: 'Yeniden deneme başarısız',
+      cleared: '{{n}} çalıştırma temizlendi',
+      clearFailed: 'Temizleme başarısız',
     },
+    clearLog: 'Geçmişi temizle',
+    clearConfirmTitle: 'Geçmiş temizlensin mi?',
+    clearConfirmBody: 'Tamamlanan, başarısız olan, iptal edilen ve kısmen başarısız tüm pipeline çalıştırmaları silinsin mi? Devam eden çalıştırmalar korunur. Bu geri alınamaz.',
+    clearConfirmAction: 'Temizle',
     jobStatus: {
       pending: 'beklemede',
       awaiting_printer: 'yazıcı bekleniyor',
@@ -1070,6 +1083,7 @@ export default {
       failed: 'başarısız',
       cancelled: 'iptal edildi',
     },
+    cancelledByUser: 'Kullanıcı tarafından iptal edildi',
   },
 
   queue: {
@@ -1150,6 +1164,7 @@ export default {
       queue: 'Kuyruk',
       history: 'Geçmiş',
       timeline: 'Zaman çizelgesi',
+      pipelines: 'Pipeline\'lar',
     },
     layout: {
       flatList: 'Liste',
@@ -2652,6 +2667,11 @@ export default {
           round_robin: 'Sırayla — uygun yazıcılar arasında döndür',
           fill_one_first: 'Önce birini doldur — tüm kopyaları tek yazıcıya sabitle',
         },
+        fanoutShort: {
+          max_parallel: 'paralel',
+          round_robin: 'sırayla',
+          fill_one_first: 'önce bir',
+        },
       },
       action: {
         save: 'Kaydet',
@@ -2664,7 +2684,21 @@ export default {
         process: 'İşlem',
         filament: 'Filament',
         filamentN: 'Filament {{n}}',
+        filamentAll: 'Tüm {{n}} yuva',
         bed: 'Tabla',
+      },
+      group: {
+        profiles: 'Profiller',
+        filaments: 'Filamentler',
+      },
+      searchPlaceholder: 'Pipeline\'larda ara…',
+      filterTargetType: 'Hedef türüne göre filtrele',
+      filterTarget: 'Hedefe göre filtrele',
+      filter: {
+        all: 'Tüm hedefler',
+        noTarget: 'Hedef belirlenmemiş',
+        count: '{{shown}} / {{total}}',
+        noMatches: 'Mevcut filtrelere uyan pipeline yok.',
       },
       toast: {
         saved: 'Pipeline kaydedildi',
