@@ -3547,6 +3547,8 @@ async def _run_slicer_with_fallback(
     # orthogonal so this decision doesn't interact with the #1337 build-
     # plate override.
     cross_class_arrange = False
+    source_model: str | None = None
+    target_model: str | None = None
     if is_3mf:
         from backend.app.services.slicer_3mf_convert import (
             extract_source_printer_model,
@@ -3555,6 +3557,14 @@ async def _run_slicer_with_fallback(
 
         source_model = extract_source_printer_model(primary_bytes)
         target_model = await _resolve_target_printer_model(db, user, request)
+        if embedded_mode and (not source_model or not target_model or source_model != target_model):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Embedded settings can only be used when the source 3MF's printer "
+                    "matches the selected target printer."
+                ),
+            )
         if source_model and target_model and is_dual_nozzle_model(source_model) != is_dual_nozzle_model(target_model):
             logger.info(
                 "Cross-nozzle-class re-slice (%s -> %s): enabling --arrange so BS reconciles "
@@ -3597,10 +3607,11 @@ async def _run_slicer_with_fallback(
     # with printer …" (#2628). Replace unused-slot entries with the
     # plate's lowest used slot before the real slice so the loaded set is
     # materially homogeneous and printer-correct.
-    if is_3mf and request.plate is not None:
+    if is_3mf:
         from backend.app.services.slicer_3mf_convert import substitute_unused_plate_filaments
 
-        filament_jsons = substitute_unused_plate_filaments(primary_bytes, request.plate, filament_jsons)
+        if request.plate is not None and request.plate != 0:
+            filament_jsons = substitute_unused_plate_filaments(primary_bytes, request.plate, filament_jsons)
 
     # Cross-class slice-all loop (#1493): when the user asks for
     # ``plate=0`` (all plates) AND the source's nozzle class differs from
@@ -3615,7 +3626,7 @@ async def _run_slicer_with_fallback(
     # ``--arrange`` is project-wide in the sidecar, so both the cross-class
     # safety path and a user's all-plates arrange request must slice each
     # plate separately before merging the results.
-    use_arrange_slice_all = arrange_flag and request.plate == 0 and request.export_3mf
+    use_arrange_slice_all = is_3mf and arrange_flag and request.plate == 0 and request.export_3mf
 
     try:
         try:
@@ -3678,12 +3689,17 @@ async def _run_slicer_with_fallback(
                             on_progress=plate_cb,
                         )
                     else:
+                        plate_filament_jsons = substitute_unused_plate_filaments(
+                            primary_bytes,
+                            plate_num,
+                            filament_jsons,
+                        )
                         per_plate = await service.slice_with_profiles(
                             model_bytes=primary_bytes,
                             model_filename=model_filename,
                             printer_profile_json=presets["printer"],
                             process_profile_json=presets["process"],
-                            filament_profile_jsons=filament_jsons,
+                            filament_profile_jsons=plate_filament_jsons,
                             plate=plate_num,
                             export_3mf=True,
                             arrange=True,
@@ -3757,11 +3773,13 @@ async def _run_slicer_with_fallback(
                 # (e.g. re-slicing an H2D model for an X1C: the object is off
                 # the smaller bed). Surface the slicer's reason instead.
                 raise HTTPException(status_code=400, detail=rejection) from exc
-            if not is_3mf or embedded_mode or use_arrange_slice_all:
+            if not is_3mf or embedded_mode or use_arrange_slice_all or request.process_overrides:
                 # There is no alternate settings source for STL, an embedded
                 # slice already used the only available settings, and an
                 # arranged slice-all cannot safely retry as a single --slice 0
                 # request because that changes the number of output plates.
+                # Explicit process overrides also cannot be represented on a
+                # profile-less retry; fail instead of silently dropping them.
                 raise
             logger.warning(
                 "Slicer CLI failed on the --load-settings path for %s (%s); retrying with embedded settings",
