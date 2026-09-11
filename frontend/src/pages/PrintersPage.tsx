@@ -4219,13 +4219,13 @@ function PrinterCard({
                 </div>
                 <p className="text-sm text-bambu-gray">
                   {printer.model || 'Unknown Model'}
-                  {/* Nozzle Info - only in expanded. Every fitted size, not
+                  {/* Nozzle info for the card view. Every fitted size, not
                       just nozzles[0]: the array is indexed by extruder, so on a
                       dual-nozzle machine with two sizes fitted showing the
                       first entry alone named one hotend and implied it was the
                       whole printer. Deduplicated, so the usual matching pair
                       still reads as a single "0.4mm". */}
-                  {viewMode === 'expanded' && installedNozzleDiameters(status).length > 0 && (
+                  {installedNozzleDiameters(status).length > 0 && (
                     <span className="ml-1.5 text-bambu-gray" title={status?.nozzles?.[0]?.nozzle_type || 'Nozzle'}>
                       • {installedNozzleDiameters(status).join(' / ')}mm
                     </span>
