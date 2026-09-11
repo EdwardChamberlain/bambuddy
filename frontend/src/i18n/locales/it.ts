@@ -4133,6 +4133,8 @@ export default {
     // Tabs
     filamentInfoTab: 'Info filamento',
     paProfileTab: 'Profilo PA',
+    colorAndCostTab: 'Colore e costo',
+    printersTab: 'Stampanti',
     filamentInfo: 'Filamento',
     additional: 'Aggiuntivo',
     // Cloud
@@ -4189,6 +4191,23 @@ export default {
     leftNozzle: 'Ugello sinistro',
     rightNozzle: 'Ugello destro',
     profilesSelected: 'profili di calibrazione selezionati',
+    // Printers tab: per-model filament preset + per-hotend K profile
+    filamentPreset: 'Preset del filamento',
+    presetUseSpoolDefault: 'Usa il preset della bobina',
+    presetInherited: 'ereditato',
+    presetOverride: 'personalizzato',
+    presetNeedsModel: 'Questa stampante non ha ancora comunicato il proprio modello, quindi non può avere un preset dedicato.',
+    autoMatchPresets: 'Abbina automaticamente',
+    autoMatchPresetsHint: 'Trova la variante del preset della bobina che nomina ciascun modello',
+    kProfilesPerPrinter: 'Profili K',
+    kProfileNotSet: 'Non impostato',
+    kProfileFlowMismatch: 'Questo profilo è stato misurato con un ugello {{profile}} ma è montato un ugello {{fitted}}, quindi non verrà applicato',
+    nozzle: 'Ugello',
+    unknownModel: 'Modello sconosciuto',
+    onePrinter: '1 stampante',
+    nPrinters: '{{n}} stampanti',
+    filamentPresetsLoadFailed: 'Impossibile caricare i preset per modello di questa bobina',
+    filamentPresetSaveFailed: 'Impossibile salvare i preset per modello',
     // Stats & enhanced table
     totalInventory: 'Inventario totale',
     totalConsumed: 'Totale consumato',
