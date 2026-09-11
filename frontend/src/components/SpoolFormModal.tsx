@@ -12,7 +12,6 @@ import type {
   PresetChoice,
   PrinterWithCalibrations,
   SpoolFormData,
-  SpoolFormMode,
 } from './spool-form/types';
 import { defaultFormData, validateForm, SPOOLMAN_LINKED_FIELDS } from './spool-form/types';
 import { buildFilamentOptions, extractBrandsFromPresets, fetchPrinterCalibrations, findPresetOption, hotendKey, loadRecentColors, parsePresetKey, parsePresetName, presetKey, saveRecentColor } from './spool-form/utils';

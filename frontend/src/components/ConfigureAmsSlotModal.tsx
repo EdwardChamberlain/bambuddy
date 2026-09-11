@@ -203,7 +203,22 @@ function colorNameToHex(name: string): string | null {
   return COLOR_NAME_MAP[normalized] || null;
 }
 
-// Escape regex metacharacters and turn whitespace into ``\s+`` so a literal
+/**
+ * Find the profile represented by a slot's calibration index and hotend.
+ * Calibration indexes are scoped to the extruder on dual-nozzle printers, so
+ * matching the index alone can select the other hotend's profile.
+ */
+function findProfileByCaliIdx(
+  profiles: KProfile[],
+  caliIdx: number,
+  extruderId: number | undefined,
+): KProfile | undefined {
+  if (extruderId !== undefined) {
+    return profiles.find((profile) => profile.slot_id === caliIdx && (profile.extruder_id ?? 0) === extruderId);
+  }
+  return profiles.find((profile) => profile.slot_id === caliIdx);
+}
+
 export function ConfigureAmsSlotModal({
   isOpen,
   onClose,
