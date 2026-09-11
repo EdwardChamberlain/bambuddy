@@ -71,6 +71,28 @@ async def test_dispatch_claim_skips_cancelled_or_removed_rows(session_maker):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_claim_rejects_reassigned_printer(session_maker):
+    item_id = await _queue_item(session_maker)
+    async with session_maker() as db:
+        item = await db.get(PrintQueueItem, item_id)
+        item.printer_id = 202
+        await db.commit()
+
+    scheduler = PrintScheduler()
+    scheduler._start_print = AsyncMock()  # type: ignore[method-assign]
+
+    with patch.object(scheduler_module, "async_session", session_maker):
+        await scheduler._dispatch_one(item_id, selected_printer_id=101)
+
+    scheduler._start_print.assert_not_awaited()
+    async with session_maker() as db:
+        item = await db.get(PrintQueueItem, item_id)
+        assert item.status == "pending"
+        assert item.printer_id == 202
+        assert item.dispatching_at is None
+
+
+@pytest.mark.asyncio
 async def test_stale_dispatch_claims_are_cleared_on_startup(session_maker):
     item_id = await _queue_item(session_maker, claimed=True)
     scheduler = PrintScheduler()

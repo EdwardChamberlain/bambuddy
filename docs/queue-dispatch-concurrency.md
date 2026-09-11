@@ -14,11 +14,16 @@ for an upload slot or a printer reservation. Queue state and dispatch
 recovery remain durable; cancellation, disconnect, restart, and worker
 failure release the in-memory reservation and leave the item for the normal
 retry/recovery path.
+Pool capacity is applied before model-targeted assignments are persisted, so
+an Any Machine job waiting for a pool slot remains eligible for a fresh printer
+match on the next scheduler pass.
 
 Before source preparation or FTP I/O, each worker claims its queue row in the
-database. Claimed rows cannot be reassigned or selected by another worker;
-cancellation and deletion cancel the matching worker, and a final compare-and-
-set prevents a cancelled or removed row from publishing an MQTT print command.
+database together with the printer selected for that pass. A reassignment that
+wins before the claim is rejected and retried on a later pass; claimed rows
+cannot be reassigned or selected by another worker. Cancellation and deletion
+cancel the matching worker, and a final compare-and-set prevents a cancelled
+or removed row from publishing an MQTT print command.
 
 ## Rollout
 
