@@ -128,6 +128,25 @@ _SLICER_OPTIONS_WAIT_TIMEOUT = 5.0
 # scheduler tick interval before dispatch picks the item up.
 _RECENT_QUEUE_ITEM_TTL = 30.0
 
+_SLICER_QUEUE_OPTION_FIELDS = (
+    "vibration_cali",
+    "layer_inspect",
+    "timelapse",
+    "use_ams",
+    "nozzle_mapping",
+)
+
+
+def _slicer_queue_options(data: dict) -> dict:
+    """Keep only slicer fields whose queue semantics are unambiguous.
+
+    BambuStudio's calibration booleans do not encode Grove's machine-managed
+    Auto state, so bed_leveling / flow_cali and their companion fields are
+    deliberately excluded. The remaining fields are boolean controls or an
+    opaque nozzle mapping that can safely be carried through.
+    """
+    return {key: data[key] for key in _SLICER_QUEUE_OPTION_FIELDS if key in data}
+
 
 def _get_serial_for_model(model: str, serial_suffix: str) -> str:
     """Get serial number for the given model and suffix."""
@@ -208,9 +227,10 @@ class VirtualPrinterInstance:
 
         # Slicer-side print options captured from the MQTT `project_file`
         # command, keyed by filename. Used by `_add_to_print_queue` so the
-        # queue item inherits the user's slicer-chosen timelapse / bed_leveling
-        # / flow_cali / vibration_cali / layer_inspect / use_ams toggles rather
-        # than falling back to the global `default_*` settings (#1403). FTP
+        # queue item inherits unambiguous boolean toggles and nozzle mapping
+        # rather than falling back to the global `default_*` settings (#1403).
+        # Calibration tri-state fields are intentionally excluded because the
+        # slicer does not encode Grove's machine-managed Auto state. FTP
         # completes a few hundred ms before the slicer's MQTT `project_file`
         # arrives, so the queue-add path waits briefly on the event below
         # before reading the dict. Events are popped along with the options
@@ -316,11 +336,12 @@ class VirtualPrinterInstance:
     async def on_print_command(self, filename: str, data: dict) -> None:
         """Handle print command from MQTT.
 
-        Captures the slicer's project_file options (`timelapse`, `bed_leveling`,
-        `flow_cali`, `vibration_cali`, `layer_inspect`, `use_ams`, plus the
-        H2C rack-pick `nozzle_mapping`) so the VP-queue path can inherit them
-        when adding the item to the queue, rather than falling back to the
-        global default settings (#1403, #1780).
+        Captures the slicer's unambiguous project_file options (`timelapse`,
+        `vibration_cali`, `layer_inspect`, `use_ams`, plus the H2C rack-pick
+        `nozzle_mapping`) so the VP-queue path can inherit them when adding the
+        item to the queue, rather than falling back to the global default
+        settings (#1403, #1780). Calibration tri-state fields are ignored here:
+        the slicer does not encode Grove's machine-managed Auto state.
         Only queue mode consumes the capture; archive / review / proxy
         modes ignore the print command, so we skip the stash there to keep
         the dict from accumulating one entry per print over the VP's
@@ -366,7 +387,8 @@ class VirtualPrinterInstance:
                 logger.debug("[VP %s] Evicted stale slicer options for %s", self.name, stale_key)
             except StopIteration:
                 pass
-        self._slicer_print_options[stash_key] = dict(data)
+        slicer_options = _slicer_queue_options(data)
+        self._slicer_print_options[stash_key] = slicer_options
         event = self._slicer_print_options_events.get(stash_key)
         if event:
             event.set()
@@ -379,7 +401,7 @@ class VirtualPrinterInstance:
         # stamp the slicer-driven fields so the dispatcher honours the
         # user's choice. Covers the #1780 round-3 race where Bambu Studio's
         # MQTT lands just past the bumped wait ceiling.
-        await self._restamp_recent_queue_item(stash_key, data)
+        await self._restamp_recent_queue_item(stash_key, slicer_options)
 
     async def _restamp_recent_queue_item(self, stash_key: str, data: dict) -> None:
         """Patch slicer-driven fields onto a queue item the MQTT command missed.
@@ -391,8 +413,8 @@ class VirtualPrinterInstance:
         row was already written with settings defaults. This method runs
         on the late MQTT path: it looks up the most recent queue items
         committed for this filename and patches in the slicer's
-        ``nozzle_mapping`` + workflow flags, but only while the items are
-        still ``pending`` (scheduler hasn't dispatched them yet).
+        ``nozzle_mapping`` + boolean workflow flags, but only while the items
+        are still ``pending`` (scheduler hasn't dispatched them yet).
         """
         if not self._session_factory:
             return
@@ -407,13 +429,13 @@ class VirtualPrinterInstance:
         import json
 
         # Mirror the field set `_add_to_print_queue` reads off slicer_opts.
-        # MQTT uses `bed_leveling` (single L); the column is `bed_levelling`.
+        # Calibration tri-state fields are intentionally absent: the slicer
+        # cannot encode Grove's machine-managed Auto state.
         # `nozzles_info` is intentionally not stamped — column kept for
         # legacy rows but never written; see PrintQueueItem.nozzles_info.
         patch: dict = {}
+        # On/off options.
         for mqtt_field, column in (
-            ("bed_leveling", "bed_levelling"),
-            ("flow_cali", "flow_cali"),
             ("vibration_cali", "vibration_cali"),
             ("layer_inspect", "layer_inspect"),
             ("timelapse", "timelapse"),
@@ -712,10 +734,25 @@ class VirtualPrinterInstance:
                 # PrintQueueItem below would fall back to the column-level
                 # defaults and ignore the user's workflow preferences (#1235).
                 # Fallbacks match AppSettings defaults in schemas/settings.py.
-                # The slicer-side options captured above (if any) take
-                # precedence per-field over these defaults.
+                # The slicer-side boolean options captured above (if any) take
+                # precedence per-field over these defaults. Calibration
+                # tri-state values always come from Grove settings/defaults;
+                # the slicer does not encode machine-managed Auto.
                 def _bool_setting(value: str | None, default: bool) -> bool:
                     return value.lower() == "true" if value is not None else default
+
+                def _tristate_setting(value: str | None, default: str) -> str:
+                    """Tri-state workflow default, coercing legacy true/false rows."""
+                    if value is None:
+                        return default
+                    low = value.strip().lower()
+                    if low in ("on", "off", "auto"):
+                        return low
+                    if low in ("true", "1"):
+                        return "on"
+                    if low in ("false", "0"):
+                        return "off"
+                    return default
 
                 def _slicer_or(field_mqtt: str, settings_default: bool) -> bool:
                     """Slicer's MQTT value if present, else the settings default.
@@ -728,13 +765,8 @@ class VirtualPrinterInstance:
                         return bool(slicer_opts[field_mqtt])
                     return settings_default
 
-                # Note the MQTT field names differ from Grove Control's column
-                # names: MQTT uses `bed_leveling` (single L) while the
-                # column / settings key use `bed_levelling` (double L).
-                bed_levelling = _slicer_or(
-                    "bed_leveling", _bool_setting(await get_setting(db, "default_bed_levelling"), True)
-                )
-                flow_cali = _slicer_or("flow_cali", _bool_setting(await get_setting(db, "default_flow_cali"), False))
+                bed_levelling = _tristate_setting(await get_setting(db, "default_bed_levelling"), "auto")
+                flow_cali = _tristate_setting(await get_setting(db, "default_flow_cali"), "auto")
                 vibration_cali = _slicer_or(
                     "vibration_cali", _bool_setting(await get_setting(db, "default_vibration_cali"), True)
                 )

@@ -96,15 +96,17 @@ class PrintQueueItem(Base):
     # true, the scheduler deletes the source row/files after archiving a copy.
     cleanup_library_after_dispatch: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # Print options
-    bed_levelling: Mapped[bool] = mapped_column(Boolean, default=True)
-    flow_cali: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Print options. bed_levelling / flow_cali / nozzle_offset_cali are tri-state
+    # strings (off/on/auto) matching BambuStudio; "auto" = skip if recently done.
+    # The remaining three stay boolean (BambuStudio exposes no auto for them).
+    bed_levelling: Mapped[str] = mapped_column(String(8), default="auto")
+    flow_cali: Mapped[str] = mapped_column(String(8), default="auto")
     vibration_cali: Mapped[bool] = mapped_column(Boolean, default=True)
     layer_inspect: Mapped[bool] = mapped_column(Boolean, default=False)
     timelapse: Mapped[bool] = mapped_column(Boolean, default=False)
     use_ams: Mapped[bool] = mapped_column(Boolean, default=True)
     # Nozzle offset calibration — dual-nozzle printers only, MQTT-gated (#1682)
-    nozzle_offset_cali: Mapped[bool] = mapped_column(Boolean, default=True)
+    nozzle_offset_cali: Mapped[str] = mapped_column(String(8), default="auto")
 
     # Status: pending, preheating, dispatching, printing, completed, failed, skipped, cancelled
     status: Mapped[str] = mapped_column(String(20), default="pending")

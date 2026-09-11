@@ -168,6 +168,7 @@ const DE_COGNATES = [
   'Avery 5160 — US Letter sheet (25.4 × 66.7 mm × 30)',
   'China', 'Proxy', 'Start',
   'Diagnose',  // DE: same spelling/meaning as EN — camera diagnostic button label
+  'Auto',      // German UI loanword for automatic mode
   '{{filament}} @ {{temp}}°C',  // drying badge: filament code + universal °C
 ];
 
