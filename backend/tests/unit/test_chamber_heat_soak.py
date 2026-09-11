@@ -280,6 +280,7 @@ def test_schema_defaults_are_off_and_patch_omission_preserves_existing_values():
     create = PrintQueueItemCreate()
     assert not create.chamber_heat_soak
     assert (create.heat_soak_temperature, create.heat_soak_minutes) == (60, 30)
+    assert (create.bed_levelling, create.flow_cali, create.nozzle_offset_cali) == ("auto", "auto", "auto")
     assert PrintQueueItemUpdate().model_dump(exclude_unset=True) == {}
 
 

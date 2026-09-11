@@ -547,13 +547,13 @@ _QUEUE_INSERT_COLUMN_DEFINITIONS: dict[str, tuple[str, str]] = {
     "skip_filament_check": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     "cleanup_library_after_dispatch": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     # Printer options
-    "bed_levelling": ("BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT true"),
-    "flow_cali": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
+    "bed_levelling": ("VARCHAR(8) DEFAULT 'auto'", "VARCHAR(8) DEFAULT 'auto'"),
+    "flow_cali": ("VARCHAR(8) DEFAULT 'auto'", "VARCHAR(8) DEFAULT 'auto'"),
     "vibration_cali": ("BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT true"),
     "layer_inspect": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     "timelapse": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),
     "use_ams": ("BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT true"),
-    "nozzle_offset_cali": ("BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT true"),
+    "nozzle_offset_cali": ("VARCHAR(8) DEFAULT 'auto'", "VARCHAR(8) DEFAULT 'auto'"),
     # Lifecycle / audit fields
     "status": ("VARCHAR(20) DEFAULT 'pending'", "VARCHAR(20) DEFAULT 'pending'"),
     "gate_acknowledged": ("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false"),

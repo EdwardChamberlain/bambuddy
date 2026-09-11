@@ -46,6 +46,23 @@ async def test_queue_schema_repair_is_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_queue_schema_repair_uses_auto_defaults_for_calibration_modes(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'calibration-modes.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE print_queue (id INTEGER PRIMARY KEY)"))
+            await ensure_queue_insert_schema(conn)
+
+            rows = await conn.execute(text("PRAGMA table_info(print_queue)"))
+            columns = {row[1]: (row[2], row[4]) for row in rows}
+
+        for column in ("bed_levelling", "flow_cali", "nozzle_offset_cali"):
+            assert columns[column] == ("VARCHAR(8)", "'auto'")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_queue_schema_repair_reports_columns_that_could_not_be_added(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unrepairable.db'}")
     try:

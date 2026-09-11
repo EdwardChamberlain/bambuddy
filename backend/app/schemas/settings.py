@@ -2,13 +2,13 @@ import json
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from backend.app.schemas.print_queue import TriState
+
 # These integrations may legitimately target services on the same host or LAN.
 # Validate unsafe destinations while preserving Grove's local-first deployment
 # model; the shared guard rejects metadata, encoded-IP, multicast, unspecified,
 # and non-HTTP targets without banning private LAN addresses.
 LAN_SERVICE_URL_SETTINGS = ("ha_url", "obico_ml_url", "orcaslicer_api_url", "bambu_studio_api_url")
-
-from backend.app.schemas.print_queue import TriState
 
 
 class AppSettings(BaseModel):
