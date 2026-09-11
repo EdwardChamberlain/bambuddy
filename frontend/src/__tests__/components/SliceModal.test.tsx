@@ -741,8 +741,8 @@ describe('SliceModal', () => {
     });
 
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
-    // 1 printer + 1 process + 2 filament + 1 bed-type (#1337) = 5 dropdowns.
-    expect(screen.getAllByRole('combobox')).toHaveLength(5);
+    // 1 printer + 1 process + 1 bed-type + 1 supports + 2 filament = 6 dropdowns.
+    expect(screen.getAllByRole('combobox')).toHaveLength(6);
   });
 
   it('pre-picks each filament slot by matching colour metadata', async () => {
@@ -947,13 +947,13 @@ describe('SliceModal', () => {
     await waitFor(() => expect(screen.getByText('X1C')).toBeDefined());
 
     // Both filament rows render — 1 printer + 1 process + 1 bed-type +
-    // 2 filament (#1337) = 5. bed-type sits at index 2, filament slots
-    // follow at 3 and 4.
+    // 1 supports + 2 filament = 6. bed-type sits at index 2, supports at
+    // index 3, and filament slots follow at 4 and 5.
     const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
-    expect(selects).toHaveLength(5);
+    expect(selects).toHaveLength(6);
     // Slot 1 (used) is editable, slot 2 (not used) is disabled.
-    expect(selects[3].disabled).toBe(false);
-    expect(selects[4].disabled).toBe(true);
+    expect(selects[4].disabled).toBe(false);
+    expect(selects[5].disabled).toBe(true);
     // The disabled row's label calls out why it's disabled.
     expect(screen.getByText(/not used by this plate/i)).toBeDefined();
   });
