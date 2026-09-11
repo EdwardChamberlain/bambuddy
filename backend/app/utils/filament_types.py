@@ -297,4 +297,3 @@ def is_material_name(value: str | None) -> bool:
     # changing the answer: "PLA-AERO" read as a material name when the table
     # had no row for it, and it still does (#2902).
     return reduced.split("-")[0] in _MATERIAL_NAMES
-

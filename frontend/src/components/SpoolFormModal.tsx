@@ -15,7 +15,7 @@ import type {
   SpoolFormMode,
 } from './spool-form/types';
 import { defaultFormData, validateForm, SPOOLMAN_LINKED_FIELDS } from './spool-form/types';
-import { buildFilamentOptions, extractBrandsFromPresets, fetchPrinterCalibrations, findPresetOption, hotendKey, loadRecentColors, pairedOptions, parsePresetKey, parsePresetName, presetKey, saveRecentColor, withCurrentValue } from './spool-form/utils';
+import { buildFilamentOptions, extractBrandsFromPresets, fetchPrinterCalibrations, findPresetOption, hotendKey, loadRecentColors, parsePresetKey, parsePresetName, presetKey, saveRecentColor } from './spool-form/utils';
 import { MATERIALS } from './spool-form/constants';
 import { FilamentSection } from './spool-form/FilamentSection';
 import { ColorSection } from './spool-form/ColorSection';

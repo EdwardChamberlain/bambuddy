@@ -908,7 +908,8 @@ async def link_spool(
 
             mqtt_client = printer_manager.get_client(p_id)
             if mqtt_client:
-                tray_type = mapped.get("material") or ""
+                material = mapped.get("material") or ""
+                tray_type = material
                 brand = mapped.get("brand") or ""
                 subtype = mapped.get("subtype") or ""
                 if brand:
