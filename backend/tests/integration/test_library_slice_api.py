@@ -894,8 +894,7 @@ class TestCrossClassSliceAllLoop:
     def _make_multi_plate_x1c_source(plate_count: int = 3) -> bytes:
         """Source 3MF: X1C-stamped, N plates declared via model_settings."""
         objects = "\n".join(
-            f'<object id="{i}"><metadata key="extruder" value="{i}"/></object>'
-            for i in range(1, plate_count + 1)
+            f'<object id="{i}"><metadata key="extruder" value="{i}"/></object>' for i in range(1, plate_count + 1)
         )
         plate_blocks = "\n".join(
             f'<plate><metadata key="plater_id" value="{i}"/>'
