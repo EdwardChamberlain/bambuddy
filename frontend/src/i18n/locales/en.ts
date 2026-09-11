@@ -3387,6 +3387,13 @@ export default {
 
   // File manager
   fileManager: {
+    variants: {
+      badge: '{{count}} versions',
+      groupAction: 'Group as versions',
+      groupTooltip: 'Mark these files as the same job sliced for different printers',
+      grouped: 'Grouped {{count}} files as versions',
+      printAlternatives: 'Print ({{count}} alternatives)',
+    },
     title: 'File Manager',
     subtitle: 'Organize and manage your print files',
     uploadFiles: 'Upload Files',
@@ -4387,6 +4394,15 @@ export default {
 
   // Print modal
   printModal: {
+    variants: {
+      title: 'Printer alternatives',
+      help: 'One job, one queue slot. The first matching printer to free up runs its file.',
+      unknownModel: 'Unknown model',
+      plateFor: 'Plate for {{filename}}',
+      moveUp: 'Move up',
+      moveDown: 'Move down',
+      queued: 'Queued with {{count}} alternatives',
+    },
     selectPrinter: 'Select Printer',
     selectPlate: 'Select Plate',
     filamentMapping: 'Filament Mapping',
