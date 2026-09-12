@@ -73,6 +73,7 @@ import { QueueStatsBar } from '../components/QueueStatsBar';
 import { CompactHistoryRow } from '../components/CompactHistoryRow';
 import { QueueTimelineView } from '../components/QueueTimelineView';
 import { ToolbarDropdown, ReactSelect } from '../components/ToolbarControls';
+import { BatchOrdersView } from '../components/BatchOrdersView';
 
 function formatWeight(g: number, useKg = false): string {
   if (useKg && g >= 1000) return `${(g / 1000).toFixed(1)}kg`;
@@ -1338,9 +1339,9 @@ export function QueuePage() {
   // History tab renders unconditionally so this no longer drives the UI.
   // Tabbed page structure: Active queue stays as the main view; History
   // and Timeline split off. Persists per-user via localStorage.
-  const [activeTab, setActiveTab] = useState<'queue' | 'history' | 'timeline'>(() => {
+  const [activeTab, setActiveTab] = useState<'queue' | 'batches' | 'history' | 'timeline'>(() => {
     const saved = localStorage.getItem('queue.activeTab');
-    if (saved === 'history' || saved === 'timeline') return saved;
+    if (saved === 'history' || saved === 'timeline' || saved === 'batches') return saved;
     return 'queue';
   });
   // Active-tab layout toggle. "position" = today's flat list; "printer"
@@ -1407,6 +1408,17 @@ export function QueuePage() {
   });
 
   const timeFormat: TimeFormat = settings?.time_format || 'system';
+
+  // Badge count for the Batches tab (#342). Deliberately its own query rather
+  // than derived from the queue: an order whose runs have all finished has no
+  // queue rows left, and those are precisely the orders the tab exists to
+  // surface. Shares the ['batches'] key with the tab itself, so dispatching or
+  // cancelling refreshes both.
+  const { data: activeBatches } = useQuery({
+    queryKey: ['batches', 'active'],
+    queryFn: () => api.getBatches('active'),
+  });
+  const activeBatchCount = activeBatches?.length ?? 0;
 
   const { data: queue, isLoading } = useQuery({
     queryKey: ['queue', filterPrinter, filterStatus],
@@ -2034,6 +2046,7 @@ export function QueuePage() {
       <div className="flex gap-1 border-b border-bambu-dark-tertiary mb-6 overflow-x-auto">
         {([
           { id: 'queue' as const, label: t('queue.tabs.queue'), icon: Clock, count: pendingItems.length + activeItems.length },
+          { id: 'batches' as const, label: t('queue.tabs.batches'), icon: Package, count: activeBatchCount },
           { id: 'history' as const, label: t('queue.tabs.history'), icon: ListOrdered, count: historyItems.length },
           { id: 'timeline' as const, label: t('queue.tabs.timeline'), icon: GanttChart, count: null as number | null },
         ]).map(({ id, label, icon: Icon, count }) => (
@@ -2060,14 +2073,14 @@ export function QueuePage() {
       </div>
 
       {/* Summary Stats */}
-      <QueueStatsBar
+      {activeTab !== 'batches' && <QueueStatsBar
         printingCount={printingCount}
         queuedCount={pendingItems.length + dispatchingItems.length}
         totalTime={totalQueueTime}
         totalWeight={totalWeight}
         historyCount={historyItems.length}
         t={t}
-      />
+      />}
 
       {/* #1818: Resume-after-failure banner. One row per printer whose queue
           is gated by a prior failed/aborted print. Visible regardless of
@@ -2107,7 +2120,7 @@ export function QueuePage() {
       )}
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-6">
+      {activeTab !== 'batches' && <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-6">
         <ToolbarDropdown
           value={filterPrinter === -1 ? 'unassigned' : filterPrinter ? String(filterPrinter) : 'all'}
           onChange={(val) => {
@@ -2167,7 +2180,7 @@ export function QueuePage() {
             {t('queue.clearHistory')}
           </Button>
         )}
-      </div>
+      </div>}
 
       {/* Queue-tab controls: layout toggle (Position / Printer) + SJF.
           Hidden on History/Timeline tabs since they don't apply. */}
@@ -2214,7 +2227,9 @@ export function QueuePage() {
         </div>
       )}
 
-      {isLoading ? (
+      {activeTab === 'batches' ? (
+        <BatchOrdersView hasPermission={hasPermission} t={t} />
+      ) : isLoading ? (
         <div className="text-center py-12 text-bambu-gray">{t('common.loading')}</div>
       ) : queue?.length === 0 ? (
         <Card className="p-12 text-center border-dashed">
