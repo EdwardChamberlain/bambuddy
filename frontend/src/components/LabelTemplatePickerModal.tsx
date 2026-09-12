@@ -71,6 +71,13 @@ const TEMPLATE_OPTIONS: TemplateOption[] = [
   },
 ];
 
+const SHEET_CAPACITIES: Partial<Record<SpoolLabelTemplate, number>> = {
+  avery_l7160: 21,
+  avery_5160: 30,
+};
+
+const MAX_SHEET_CAPACITY = 30;
+
 function openBlobInNewTab(blob: Blob): void {
   const url = window.URL.createObjectURL(blob);
   // Do NOT pass `noopener,noreferrer`: per the WindowFeatures spec, `noopener`
@@ -174,6 +181,7 @@ export function LabelTemplatePickerModal({
   const [search, setSearch] = useState('');
   const [materialFilter, setMaterialFilter] = useState<string>('');
   const [sortMode, setSortMode] = useState<SortMode>('id');
+  const [startingPositionInput, setStartingPositionInput] = useState('1');
 
   // Sync from caller and reset transient state on open. Intentionally not
   // reactive to props while open — once the user starts editing we don't want
@@ -185,6 +193,7 @@ export function LabelTemplatePickerModal({
       setSearch('');
       setMaterialFilter('');
       setSortMode('id');
+      setStartingPositionInput('1');
       setPending(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -234,6 +243,9 @@ export function LabelTemplatePickerModal({
 
   const selectedCount = selectedIds.size;
   const noSelection = selectedCount === 0;
+  const startingPosition = Number(startingPositionInput);
+  const startingPositionIsValid =
+    Number.isInteger(startingPosition) && startingPosition >= 1 && startingPosition <= MAX_SHEET_CAPACITY;
 
   function toggleOne(id: number) {
     setSelectedIds((prev) => {
@@ -266,15 +278,32 @@ export function LabelTemplatePickerModal({
 
   async function handlePick(template: SpoolLabelTemplate) {
     if (noSelection || pending) return;
+    const sheetCapacity = SHEET_CAPACITIES[template];
+    if (sheetCapacity !== undefined && (!startingPositionIsValid || startingPosition > sheetCapacity)) {
+      showToast(
+        t(
+          'inventory.labels.startingPositionRangeError',
+          'Starting position must be between 1 and {{capacity}} for this sheet.',
+          { capacity: sheetCapacity },
+        ),
+        'error',
+      );
+      return;
+    }
     // Order matters: the backend (labels.py) prints labels in the same order
     // we send IDs. Use the sorted list so a "by colour" sort flows through to
     // the PDF instead of being clobbered by an ascending-ID re-sort.
     const ids = sortedSpools.filter((s) => selectedIds.has(s.id)).map((s) => s.id);
     setPending(template);
     try {
+      const request = {
+        spool_ids: ids,
+        template,
+        ...(sheetCapacity === undefined ? {} : { starting_position: startingPosition }),
+      };
       const blob = spoolmanMode
-        ? await api.printSpoolmanSpoolLabels({ spool_ids: ids, template })
-        : await api.printSpoolLabels({ spool_ids: ids, template });
+        ? await api.printSpoolmanSpoolLabels(request)
+        : await api.printSpoolLabels(request);
       openBlobInNewTab(blob);
       onClose();
     } catch (err) {
@@ -391,6 +420,42 @@ export function LabelTemplatePickerModal({
           </div>
         </div>
 
+        <div className="px-4 pt-2 pb-1 border-t border-bambu-dark-tertiary">
+          <div className="flex items-start gap-3">
+            <label htmlFor="label-starting-position" className="text-sm text-white whitespace-nowrap pt-1.5">
+              {t('inventory.labels.startingPosition', 'Starting label position')}
+            </label>
+            <input
+              id="label-starting-position"
+              data-testid="label-starting-position"
+              type="number"
+              min={1}
+              max={MAX_SHEET_CAPACITY}
+              step={1}
+              value={startingPositionInput}
+              onChange={(event) => setStartingPositionInput(event.target.value)}
+              aria-describedby="label-starting-position-help"
+              className="w-20 px-2 py-1 bg-bambu-dark border border-bambu-dark-tertiary rounded text-white text-sm focus:outline-none focus:border-bambu-green"
+            />
+            <div id="label-starting-position-help" className="text-xs text-bambu-gray pt-1.5">
+              <div>{t('inventory.labels.startingPositionRange', 'Sheet labels: L7160 has 21 positions; 5160 has 30.')}</div>
+              <div data-testid="label-starting-position-status" className={startingPositionIsValid ? '' : 'text-red-400'}>
+                {!startingPositionIsValid
+                  ? t('inventory.labels.startingPositionInvalid', 'Enter a whole number from 1 to {{capacity}}.', {
+                      capacity: MAX_SHEET_CAPACITY,
+                    })
+                  : startingPosition === 1
+                    ? t('inventory.labels.startingPositionFirst', 'Printing starts at position 1.')
+                    : t(
+                        'inventory.labels.startingPositionSkipped',
+                        'Positions 1 through {{lastPosition}} will be left blank on the first sheet.',
+                        { lastPosition: startingPosition - 1 },
+                      )}
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Action bar */}
         <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 flex-wrap">
           <span className="text-sm text-bambu-gray">
@@ -470,12 +535,22 @@ export function LabelTemplatePickerModal({
         <div className="px-3 pt-2 pb-2 grid grid-cols-1 sm:grid-cols-2 gap-2 border-t border-bambu-dark-tertiary">
           {TEMPLATE_OPTIONS.map((opt) => {
             const isPending = pending === opt.value;
+            const sheetCapacity = SHEET_CAPACITIES[opt.value];
+            const startingPositionExceedsSheet =
+              sheetCapacity !== undefined && (!startingPositionIsValid || startingPosition > sheetCapacity);
             const label = t(`inventory.labels.templates.${opt.i18nKey}.label`, opt.fallbackLabel);
-            const hint = t(`inventory.labels.templates.${opt.i18nKey}.hint`, opt.fallbackHint);
+            const hint = startingPositionExceedsSheet
+              ? t(
+                  'inventory.labels.startingPositionRangeError',
+                  'Starting position must be between 1 and {{capacity}} for this sheet.',
+                  { capacity: sheetCapacity },
+                )
+              : t(`inventory.labels.templates.${opt.i18nKey}.hint`, opt.fallbackHint);
             return (
               <button
                 key={opt.value}
-                disabled={noSelection || pending !== null}
+                data-testid={`print-labels-${opt.value}`}
+                disabled={noSelection || pending !== null || startingPositionExceedsSheet}
                 onClick={() => handlePick(opt.value)}
                 title={`${label} — ${hint}`}
                 className="w-full text-left p-2.5 rounded-lg border border-bambu-dark-tertiary bg-bambu-dark hover:border-bambu-green hover:bg-bambu-green/10 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-bambu-dark-tertiary disabled:hover:bg-bambu-dark transition flex items-center gap-3"

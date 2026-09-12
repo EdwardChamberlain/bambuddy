@@ -388,4 +388,85 @@ describe('LabelTemplatePickerModal', () => {
       });
     });
   });
+
+  it('sends the selected starting position for an Avery sheet', async () => {
+    vi.mocked(api.printSpoolLabels).mockResolvedValue(PDF_BLOB);
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '8' } });
+    expect(screen.getByTestId('label-starting-position-status')).toHaveTextContent(/Positions 1 through 7/i);
+    fireEvent.click(screen.getByTestId('print-labels-avery_5160'));
+
+    await waitFor(() => {
+      expect(api.printSpoolLabels).toHaveBeenCalledWith({
+        spool_ids: [1],
+        template: 'avery_5160',
+        starting_position: 8,
+      });
+    });
+  });
+
+  it('sends the selected starting position to the Spoolman sheet endpoint', async () => {
+    vi.mocked(api.printSpoolmanSpoolLabels).mockResolvedValue(PDF_BLOB);
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={true}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '5' } });
+    fireEvent.click(screen.getByTestId('print-labels-avery_l7160'));
+
+    await waitFor(() => {
+      expect(api.printSpoolmanSpoolLabels).toHaveBeenCalledWith({
+        spool_ids: [1],
+        template: 'avery_l7160',
+        starting_position: 5,
+      });
+    });
+  });
+
+  it('disables only the sheet template whose capacity is exceeded', () => {
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '25' } });
+    expect(screen.getByTestId('print-labels-avery_l7160')).toBeDisabled();
+    expect(screen.getByTestId('print-labels-avery_5160')).toBeEnabled();
+  });
+
+  it('shows the maximum capacity for invalid starting positions', () => {
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '31' } });
+    expect(screen.getByTestId('label-starting-position-status')).toHaveTextContent('Enter a whole number from 1 to 30.');
+    expect(screen.getByTestId('label-starting-position-status')).not.toHaveTextContent('{{capacity}}');
+  });
 });
