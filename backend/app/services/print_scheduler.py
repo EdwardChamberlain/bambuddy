@@ -730,7 +730,7 @@ class PrintScheduler:
                 # prove material/colour compatibility. Keep it pending rather
                 # than silently degrading to the legacy type-only mapper.
                 match_preference = getattr(item, "force_color_match", None)
-                if type(match_preference) is bool and not self._has_verifiable_filament_metadata(item):
+                if match_preference is True and not self._has_verifiable_filament_metadata(item):
                     waiting_reason = "Material/colour metadata unavailable; cannot verify a safe filament match"
                     if item.waiting_reason != waiting_reason:
                         item.waiting_reason = waiting_reason

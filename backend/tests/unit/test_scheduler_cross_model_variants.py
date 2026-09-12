@@ -250,6 +250,9 @@ async def _add_variant_item(ctx, specs):
             status="pending",
             position=1,
             target_model=specs[0]["model"],
+            # These tests isolate candidate selection. The real queue API keeps
+            # the safe default enabled and persists sliced filament metadata.
+            force_color_match=False,
         )
         db.add(item)
         await db.flush()
@@ -425,7 +428,7 @@ async def test_item_with_no_files_left_is_held_with_an_actionable_reason(queue_d
     every candidate used to sail into dispatch and die there on "No archive_id
     or library_file_id"; hold it where the user can see why."""
     async with queue_db.session_maker() as db:
-        db.add(PrintQueueItem(status="pending", position=1, target_model="H2S"))
+        db.add(PrintQueueItem(status="pending", position=1, target_model="H2S", force_color_match=False))
         await db.commit()
     scheduler = PrintScheduler()
     finder = _finder_for({"H2S": 1})
@@ -461,6 +464,7 @@ async def test_plain_model_based_item_is_untouched(queue_db):
                 target_model="H2S",
                 library_file_id=lib.id,
                 plate_id=2,
+                force_color_match=False,
             )
         )
         await db.commit()
